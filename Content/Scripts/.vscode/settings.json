@@ -1,0 +1,17 @@
+{
+    "python.languageServer": "Pylance",
+    "python.analysis.autoImportCompletions": false,
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportGeneralTypeIssues": "none", 
+        "reportMissingImports": "none", 
+        "reportMissingModuleSource": "none", 
+        "reportUnboundVariable": "none", 
+        "reportUndefinedVariable": "none",
+        "reportShadowedImports": "none",
+    },
+    "python.analysis.extraPaths": [
+        "Lib",
+        "../Plugins/NePythonBinding/Tools/pystubs"
+    ],
+    "python.analysis.typeCheckingMode": "off"
+}

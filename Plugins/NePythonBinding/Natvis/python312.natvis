@@ -1,0 +1,558 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+	<!--PyObject-->
+	<Type Name="python312.dll!_object">
+		<!--_PyTypeObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyType_Type">(pytype) {((python312.dll!PyTypeObject*)this)->tp_name,s}</DisplayString>
+		<!--_Py_NoneStruct-->
+		<DisplayString Condition="(void*)this==(void*)&amp;python312.dll!_Py_NoneStruct">(pynone)</DisplayString>
+		<!--_Py_TrueStruct-->
+		<DisplayString Condition="(void*)this==(void*)&amp;python312.dll!_Py_TrueStruct">(pytrue)</DisplayString>
+		<!--_Py_FalseStruct-->
+		<DisplayString Condition="(void*)this==(void*)&amp;python312.dll!_Py_FalseStruct">(pyfalse)</DisplayString>	
+		<!--PyLongObject - Python 3.12 使用紧凑表示-->
+		<!-- 紧凑模式: lv_tag < 16 (即 2 << 3) -->
+		<!-- 计算公式: (1 - (lv_tag & 3)) * ob_digit[0] -->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyLong_Type &amp;&amp; ((python312.dll!PyLongObject*)this)->long_value.lv_tag &lt; 16">(pyint) {((int)1 - (int)(((python312.dll!PyLongObject*)this)->long_value.lv_tag &amp; 3)) * (long long)((python312.dll!PyLongObject*)this)->long_value.ob_digit[0]} </DisplayString>
+		<!-- 非紧凑模式 - 多digit大整数 -->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyLong_Type &amp;&amp; ((python312.dll!PyLongObject*)this)->long_value.lv_tag &gt;= 16">(pyint) [large: {((python312.dll!PyLongObject*)this)->long_value.lv_tag &gt;&gt; 3} digits]</DisplayString>
+		<!--PyFloatObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyFloat_Type">(py{ob_type->tp_name,sb}) {((python312.dll!PyFloatObject*)this)->ob_fval}</DisplayString>
+		<!--PyUnicodeObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyUnicode_Type &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.compact &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.ascii">(pyascii) {((python312.dll!PyASCIIObject*)this) + 1, s}</DisplayString>
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyUnicode_Type &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.compact &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.kind == 1">(pyutf8) {((python312.dll!PyCompactUnicodeObject*)this) + 1, s8}</DisplayString>
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyUnicode_Type &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.compact &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.kind == 2">(pyutf16) {((python312.dll!PyCompactUnicodeObject*)this) + 1, su}</DisplayString>
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyUnicode_Type &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.compact &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.kind == 4">(pyutf32) {((python312.dll!PyCompactUnicodeObject*)this) + 1, s32}</DisplayString>
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyUnicode_Type &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.kind == 0">(pylegacy) [unsupported wstr]</DisplayString>
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyUnicode_Type &amp;&amp; !((python312.dll!PyASCIIObject*)this)->state.compact &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.kind == 1">(pyutf8) {((python312.dll!PyUnicodeObject*)this)->data.any, s8}</DisplayString>
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyUnicode_Type &amp;&amp; !((python312.dll!PyASCIIObject*)this)->state.compact &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.kind == 2">(pyutf16) {((python312.dll!PyUnicodeObject*)this)->data.any, su}</DisplayString>
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyUnicode_Type &amp;&amp; !((python312.dll!PyASCIIObject*)this)->state.compact &amp;&amp; ((python312.dll!PyASCIIObject*)this)->state.kind == 4">(pyutf32) {((python312.dll!PyUnicodeObject*)this)->data.any, s32}</DisplayString>
+		<!--PyListObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyList_Type">(py{ob_type->tp_name,sb}) [{((python312.dll!PyListObject*)this)->ob_base.ob_size}]</DisplayString>
+		<!--PyTupleObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyTuple_Type">(py{ob_type->tp_name,sb}) [{((python312.dll!PyTupleObject*)this)->ob_base.ob_size}]</DisplayString>
+		<!--PyDictObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyDict_Type">(py{ob_type->tp_name,sb}) [{((python312.dll!PyDictObject*)this)->ma_used}]</DisplayString>
+		<!--PyBytesObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyBytes_Type">(py{ob_type->tp_name,sb}) [{((python312.dll!PyBytesObject*)this)->ob_base.ob_size}]</DisplayString>
+		<!--PyByteArrayObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyByteArray_Type">(py{ob_type->tp_name,sb}) [{((python312.dll!PyByteArrayObject*)this)->ob_base.ob_size}]</DisplayString>
+		<!--PySetObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PySet_Type">(py{ob_type->tp_name,sb}) [{((python312.dll!PySetObject*)this)->used}]</DisplayString>
+		<!--PyFrozenSetObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyFrozenSet_Type">(py{ob_type->tp_name,sb}) [{((python312.dll!PySetObject*)this)->used}]</DisplayString>
+		<!--PyComplexObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyComplex_Type">(py{ob_type->tp_name,sb}) {((python312.dll!PyComplexObject*)this)->cval.real}+{((python312.dll!PyComplexObject*)this)->cval.imag}j</DisplayString>
+		<!--PySliceObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PySlice_Type">(py{ob_type->tp_name,sb}) {((python312.dll!PySliceObject*)this)->start,na}:{((python312.dll!PySliceObject*)this)->stop,na}:{((python312.dll!PySliceObject*)this)->step,na}</DisplayString>
+		<!--PyMemoryViewObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyMemoryView_Type">(py{ob_type->tp_name,sb}) [{((python312.dll!PyMemoryViewObject*)this)->view.len} bytes]</DisplayString>
+		<!--PyModuleObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyModule_Type">(py{ob_type->tp_name,sb}) {((python312.dll!PyModuleObject*)this)->md_name,na}</DisplayString>
+		<!--PyFunctionObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyFunction_Type">(py{ob_type->tp_name,sb}) {((python312.dll!PyFunctionObject*)this)->func_name,na}</DisplayString>
+		<!--PyCFunctionObject-->
+		<DisplayString Condition="(void*)ob_type==(void*)&amp;python312.dll!PyCFunction_Type">(py{ob_type->tp_name,sb}) {((python312.dll!PyCFunctionObject*)this)->m_ml->ml_name,na}</DisplayString>
+		<Expand>
+			<Item Name="[type]">ob_type->tp_name,s</Item>
+			<!--PyLongObject - 简化展开-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyLong_Type" Name="[lv_tag]">((python312.dll!PyLongObject*)this)->long_value.lv_tag</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyLong_Type" Name="[is_compact]">((python312.dll!PyLongObject*)this)->long_value.lv_tag &lt; 16</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyLong_Type" Name="[ndigits]">(((python312.dll!PyLongObject*)this)->long_value.lv_tag &gt;&gt; 3)</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyLong_Type" Name="[bits]">(((python312.dll!PyLongObject*)this)->long_value.lv_tag &gt;&gt; 3) * 30</Item>
+			<!-- 紧凑模式显示计算值 -->			
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyLong_Type &amp;&amp; ((python312.dll!PyLongObject*)this)->long_value.lv_tag &lt; 16" Name="[value]">((int)1 - (int)(((python312.dll!PyLongObject*)this)->long_value.lv_tag &amp; 3)) * (long long)((python312.dll!PyLongObject*)this)->long_value.ob_digit[0]</Item>
+			<Synthetic Condition="(void*)ob_type==(void*)&amp;python312.dll!PyLong_Type &amp;&amp; (((python312.dll!PyLongObject*)this)->long_value.lv_tag &gt;&gt; 3) &gt; 0" Name="[computed_value]">
+				<Expand>
+					<CustomListItems>
+						<Variable Name="i" InitialValue="0"/>
+						<Variable Name="result" InitialValue="0ULL"/>
+						<Variable Name="power" InitialValue="1ULL"/>
+						<Variable Name="ndigits" InitialValue="(((python312.dll!PyLongObject*)this)->long_value.lv_tag &gt;&gt; 3)"/>
+						<Variable Name="digits" InitialValue="(uint32_t*)(&amp;((python312.dll!PyLongObject*)this)->long_value.ob_digit)"/>
+						<Variable Name="lv_tag" InitialValue="((python312.dll!PyLongObject*)this)->long_value.lv_tag"/>
+						<Variable Name="sign_bits" InitialValue="(int)(lv_tag &amp; 3)"/>
+						<Variable Name="sign" InitialValue="1 - sign_bits"/>
+						<Variable Name="overflow" InitialValue="0"/>						
+						<!-- 只处理最多2个digits，因为2^60 < 2^63 保证不溢出 -->
+						<Loop Condition="i &lt; ndigits &amp;&amp; i &lt; 2 &amp;&amp; overflow == 0">
+							<Exec>result = result + ((unsigned long long)digits[i]) * power</Exec>
+							<Exec>power = power * 1073741824ULL</Exec>
+							<Exec>i = i + 1</Exec>
+						</Loop>						
+						<!-- 如果超过2个digits，标记为溢出 -->
+						<Exec Condition="ndigits &gt; 2">overflow = 1</Exec>						
+						<Item Name="[sign_bits]">sign_bits</Item>
+						<Item Name="[sign]">sign</Item>
+						<Item Name="[ndigits_used]">i</Item>
+						<Item Name="[unsigned_result]">result</Item>						
+						<!-- 显示最终值 -->
+						<Item Condition="overflow == 0 &amp;&amp; sign &gt;= 0 &amp;&amp; result &lt;= 9223372036854775807ULL" Name="[value]">(long long)result</Item>
+						<Item Condition="overflow == 0 &amp;&amp; sign &lt; 0 &amp;&amp; result &lt;= 9223372036854775808ULL" Name="[value]">-(long long)result</Item>
+						<Item Condition="overflow != 0 || (sign &gt;= 0 &amp;&amp; result &gt; 9223372036854775807ULL) || (sign &lt; 0 &amp;&amp; result &gt; 9223372036854775808ULL)" Name="[value]">"overflow (too large for c++)"</Item>
+					</CustomListItems>
+				</Expand>
+			</Synthetic>
+			<Synthetic Condition="(void*)ob_type==(void*)&amp;python312.dll!PyLong_Type &amp;&amp; (((python312.dll!PyLongObject*)this)->long_value.lv_tag &gt;&gt; 3) &gt; 0" Name="[digits]">
+				<DisplayString>digits[{(((python312.dll!PyLongObject*)this)->long_value.lv_tag &gt;&gt; 3)}] ({(((python312.dll!PyLongObject*)this)->long_value.lv_tag &gt;&gt; 3) * 30} bits) value=sum(val * (2**30)**i for i, val in enumerate(digit))</DisplayString>
+				<Expand>
+					<ArrayItems>
+						<Size>(((python312.dll!PyLongObject*)this)->long_value.lv_tag &gt;&gt; 3)</Size>
+						<ValuePointer>(uint32_t*)(&amp;((python312.dll!PyLongObject*)this)->long_value.ob_digit)</ValuePointer>
+					</ArrayItems>
+				</Expand>
+			</Synthetic>
+			<!--PyFloatObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyFloat_Type" Name="[value]">((python312.dll!PyFloatObject*)this)->ob_fval</Item>
+			<!--PyUnicodeObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyUnicode_Type" Name="[pyobj]">(python312.dll!PyUnicodeObject*)this</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyUnicode_Type" Name="[size]">((python312.dll!PyASCIIObject*)this)->length</Item>
+			<!--ArrayItems Condition="(void*)ob_type==(void*)&amp;python312.dll!PyUnicode_Type">
+				<Size>((python312.dll!PyASCIIObject*)this)->length + 1</Size>
+				<ValuePointer>(char*)(((python312.dll!PyASCIIObject*)this) + 1)</ValuePointer>
+			</ArrayItems-->
+			<!--PyListObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyList_Type" Name="[pyobj]">(python312.dll!PyListObject*)this</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyList_Type" Name="[size]">((python312.dll!PyListObject*)this)->ob_base.ob_size</Item>
+			<ArrayItems Condition="(void*)ob_type==(void*)&amp;python312.dll!PyList_Type">
+				<Size>((python312.dll!PyListObject*)this)->ob_base.ob_size</Size>
+				<ValuePointer>((python312.dll!PyListObject*)this)->ob_item,na</ValuePointer>
+			</ArrayItems>
+			<!--PyTupleObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyTuple_Type" Name="[pyobj]">(python312.dll!PyTupleObject*)this</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyTuple_Type" Name="[size]">((python312.dll!PyTupleObject*)this)->ob_base.ob_size</Item>
+			<ArrayItems Condition="(void*)ob_type==(void*)&amp;python312.dll!PyTuple_Type">
+				<Size>((python312.dll!PyTupleObject*)this)->ob_base.ob_size</Size>
+				<ValuePointer>((python312.dll!PyTupleObject*)this)->ob_item,na</ValuePointer>
+			</ArrayItems>
+			<!-- PyDictObject 参考源码DK_ENTRIES-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyDict_Type" Name="[pyobj]">(python312.dll!PyDictObject*)this</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyDict_Type" Name="[size]">((python312.dll!PyDictObject*)this)->ma_used</Item>
+			<CustomListItems Condition="(void*)ob_type==(void*)&amp;python312.dll!PyDict_Type">
+				<Variable Name="ma_used" InitialValue="((python312.dll!PyDictObject*)this)->ma_used"/>
+				<Variable Name="ma_keys" InitialValue="((python312.dll!PyDictObject*)this)->ma_keys"/>
+				<Variable Name="dk_kind" InitialValue="ma_keys->dk_kind"/>
+				<Variable Name="dk_nentries" InitialValue="ma_keys->dk_nentries"/>
+				<Variable Name="skey_entry" InitialValue="((python312.dll!PyDictKeyEntry*)(&amp;((int8_t*)((ma_keys)->dk_indices))[(size_t)1&lt;&lt;(ma_keys)->dk_log2_size]))"/>
+				<Variable Name="ukey_entry" InitialValue="((python312.dll!PyDictUnicodeEntry*)(&amp;((int8_t*)((ma_keys)->dk_indices))[(size_t)1&lt;&lt;(ma_keys)->dk_log2_size]))"/>
+				<Variable Name="ma_values" InitialValue="((python312.dll!PyDictObject*)this)->ma_values"/>
+				<Variable Name="i" InitialValue="0"/>
+				<Variable Name="j" InitialValue="0"/>
+				<!-- 遍历ma_keys-->
+				<Loop Condition="ma_values==nullptr &amp;&amp; i&lt;dk_nentries">
+					<Exec>j=i</Exec>
+					<Exec>i++</Exec>
+					<!-- PyDictKeyEntry -->
+					<Loop Condition="j&lt;dk_nentries &amp;&amp; dk_kind==0 &amp;&amp; skey_entry[j].me_value==nullptr">
+						<Exec>j++</Exec>
+					</Loop>
+					<Item Condition="dk_kind==0" Name="{skey_entry[j].me_key,na}">skey_entry[j].me_value,na</Item>
+					<!-- PyDictUnicodeEntry -->
+					<Loop Condition="j&lt;dk_nentries &amp;&amp; dk_kind!=0 &amp;&amp; ukey_entry[j].me_value==nullptr">
+						<Exec>j++</Exec>
+					</Loop>
+					<Item Condition="dk_kind!=0" Name="{ukey_entry[j].me_key,na}">ukey_entry[j].me_value,na</Item>
+				</Loop>
+				<!-- 遍历ma_values-->
+				<Loop Condition="ma_values!=nullptr &amp;&amp; i&lt;ma_used">
+					<Exec>j=((char*)ma_values)[-3-i]</Exec>
+					<Exec>i++</Exec>
+					<Item Name="{ukey_entry[j].me_key,na}">ma_values->values[j],na</Item>
+				</Loop>
+			</CustomListItems>
+			<!--PyBytesObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyBytes_Type" Name="[pyobj]">(python312.dll!PyBytesObject*)this</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyBytes_Type" Name="[size]">((python312.dll!PyBytesObject*)this)->ob_base.ob_size</Item>
+			<ArrayItems Condition="(void*)ob_type==(void*)&amp;python312.dll!PyBytes_Type">
+				<Size>((python312.dll!PyBytesObject*)this)->ob_base.ob_size</Size>
+				<ValuePointer>((python312.dll!PyBytesObject*)this)->ob_sval</ValuePointer>
+			</ArrayItems>
+			<!--PyByteArrayObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyByteArray_Type" Name="[pyobj]">(python312.dll!PyByteArrayObject*)this</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyByteArray_Type" Name="[size]">((python312.dll!PyByteArrayObject*)this)->ob_base.ob_size</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyByteArray_Type" Name="[alloc]">((python312.dll!PyByteArrayObject*)this)->ob_alloc</Item>
+			<ArrayItems Condition="(void*)ob_type==(void*)&amp;python312.dll!PyByteArray_Type">
+				<Size>((python312.dll!PyByteArrayObject*)this)->ob_base.ob_size</Size>
+				<ValuePointer>((python312.dll!PyByteArrayObject*)this)->ob_bytes</ValuePointer>
+			</ArrayItems>
+			<!--PySetObject / PyFrozenSetObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PySet_Type || (void*)ob_type==(void*)&amp;python312.dll!PyFrozenSet_Type" Name="[pyobj]">(python312.dll!PySetObject*)this</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PySet_Type || (void*)ob_type==(void*)&amp;python312.dll!PyFrozenSet_Type" Name="[used]">((python312.dll!PySetObject*)this)->used</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PySet_Type || (void*)ob_type==(void*)&amp;python312.dll!PyFrozenSet_Type" Name="[mask]">((python312.dll!PySetObject*)this)->mask</Item>
+			<!--PyComplexObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyComplex_Type" Name="[real]">((python312.dll!PyComplexObject*)this)->cval.real</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyComplex_Type" Name="[imag]">((python312.dll!PyComplexObject*)this)->cval.imag</Item>
+			<!--PySliceObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PySlice_Type" Name="[start]">((python312.dll!PySliceObject*)this)->start,na</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PySlice_Type" Name="[stop]">((python312.dll!PySliceObject*)this)->stop,na</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PySlice_Type" Name="[step]">((python312.dll!PySliceObject*)this)->step,na</Item>
+			<!--PyMemoryViewObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyMemoryView_Type" Name="[pyobj]">(python312.dll!PyMemoryViewObject*)this</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyMemoryView_Type" Name="[obj]">((python312.dll!PyMemoryViewObject*)this)->view.obj,na</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyMemoryView_Type" Name="[buf]">((python312.dll!PyMemoryViewObject*)this)->view.buf</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyMemoryView_Type" Name="[len]">((python312.dll!PyMemoryViewObject*)this)->view.len</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyMemoryView_Type" Name="[readonly]">((python312.dll!PyMemoryViewObject*)this)->view.readonly</Item>
+			<!--PyModule_Type-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyModule_Type" Name="[pyobj]">(python312.dll!PyModuleObject*)this</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyModule_Type" Name="[name]">((python312.dll!PyModuleObject*)this)->md_name</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyModule_Type" Name="[dict]">((python312.dll!PyModuleObject*)this)->md_dict</Item>
+			<!--PyFunctionObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyFunction_Type" Name="[pyobj]">(python312.dll!PyFunctionObject*)this</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyFunction_Type" Name="[module]">((python312.dll!PyFunctionObject*)this)->func_module,na</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyFunction_Type" Name="[name]">((python312.dll!PyFunctionObject*)this)->func_name,na</Item>
+			<!--PyCFunctionObject-->
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyCFunction_Type" Name="[pyobj]">(python312.dll!PyCFunctionObject*)this</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyCFunction_Type" Name="[module]">((python312.dll!PyCFunctionObject*)this)->m_module,na</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyCFunction_Type" Name="[name]">((python312.dll!PyCFunctionObject*)this)->m_ml->ml_name,s</Item>
+			<Item Condition="(void*)ob_type==(void*)&amp;python312.dll!PyCFunction_Type" Name="[method]">((python312.dll!PyCFunctionObject*)this)->m_ml->ml_meth</Item>
+		</Expand>
+	</Type>
+
+	<!--PyCodeObject-->
+	<Type Name="python312.dll!PyCodeObject">
+		<DisplayString>(pycode) {(char*)(((python312.dll!PyASCIIObject*)co_name) + 1), s}</DisplayString>
+		<Expand>
+			<Item Name="[file]">co_filename,na</Item>
+			<Item Name="[lineno]">co_firstlineno</Item>
+			<Item Name="[name]">co_name,na</Item>
+		</Expand>
+	</Type>
+
+	<!--_PyInterpreterFrame-->
+	<Type Name="python312.dll!_PyInterpreterFrame">
+		<Intrinsic Optional="true" Name="funcname" Expression="(char*)(((python312.dll!PyASCIIObject*)(f_code->co_name)) + 1)"/>
+		<Intrinsic Optional="true" Name="filename" Expression="(char*)(((python312.dll!PyASCIIObject*)(f_code->co_filename)) + 1)"/>
+		<Intrinsic Optional="true" Name="firstlineno" Expression="f_code->co_firstlineno"/>
+		<Intrinsic Optional="true" Name="lasti" Expression="(int)(prev_instr - (_Py_CODEUNIT*)f_code->co_code_adaptive)"/>
+		<DisplayString>(pyframe) {funcname(),na}:{filename(),na}:{firstlineno()}</DisplayString>
+		<Expand>
+			<!-- 基本信息 -->
+			<Item Name="[func]">funcname(),na</Item>
+			<Item Name="[file]">filename(),na</Item>
+			<Item Name="[func lineno]">firstlineno()</Item>
+			<Item Name="[lasti]">lasti()</Item>
+			<Item Name="[owner]">(int)owner</Item>
+			<Item Name="[stacktop]">stacktop</Item>
+			<Item Name="[return_offset]">return_offset</Item>
+			
+			<!-- 引用对象 -->
+			<Item Name="[f_funcobj]">f_funcobj</Item>
+			<Item Name="[f_globals]">f_globals</Item>
+			<Item Name="[f_builtins]">f_builtins</Item>
+			<Item Name="[f_locals]">f_locals</Item>
+			<Item Name="[frame_obj]">frame_obj</Item>
+			
+			<!-- Locals + Stack 数组 -->
+			<Synthetic Name="[localsplus]">
+				<DisplayString>locals and stack array (nlocalsplus={f_code->co_nlocalsplus}, stacktop={stacktop})</DisplayString>
+				<Expand>
+					<ArrayItems>
+						<Size>stacktop</Size>
+						<ValuePointer>localsplus</ValuePointer>
+					</ArrayItems>
+				</Expand>
+			</Synthetic>
+			
+			<!-- Locals 变量 -->
+			<Synthetic Name="[locals vars]">
+				<DisplayString>local variables (count={f_code->co_nlocals})</DisplayString>
+				<Expand>
+					<CustomListItems>
+						<Variable Name="i" InitialValue="0"/>
+						<Variable Name="nlocals" InitialValue="f_code->co_nlocals"/>
+						<Variable Name="varnames" InitialValue="(python312.dll!PyTupleObject*)f_code->co_localsplusnames"/>
+						<Loop Condition="i &lt; nlocals">
+							<Item Name="{((python312.dll!_object**)varnames->ob_item)[i],na}">localsplus[i],na</Item>
+							<Exec>i = i + 1</Exec>
+						</Loop>
+					</CustomListItems>
+				</Expand>
+			</Synthetic>
+			
+			<!-- Cell 变量 -->
+			<Synthetic Condition="f_code->co_ncellvars &gt; 0" Name="[cell vars]">
+				<DisplayString>cell variables (count={f_code->co_ncellvars})</DisplayString>
+				<Expand>
+					<CustomListItems>
+						<Variable Name="i" InitialValue="0"/>
+						<Variable Name="ncells" InitialValue="f_code->co_ncellvars"/>
+						<Variable Name="offset" InitialValue="f_code->co_nlocals"/>
+						<Variable Name="varnames" InitialValue="(python312.dll!PyTupleObject*)f_code->co_localsplusnames"/>
+						<Loop Condition="i &lt; ncells">
+							<Item Name="{((python312.dll!_object**)varnames->ob_item)[offset + i],na}">localsplus[offset + i],na</Item>
+							<Exec>i = i + 1</Exec>
+						</Loop>
+					</CustomListItems>
+				</Expand>
+			</Synthetic>
+			
+			<!-- Free 变量 -->
+			<Synthetic Condition="f_code->co_nfreevars &gt; 0" Name="[free vars]">
+				<DisplayString>free variables (count={f_code->co_nfreevars})</DisplayString>
+				<Expand>
+					<CustomListItems>
+						<Variable Name="i" InitialValue="0"/>
+						<Variable Name="nfrees" InitialValue="f_code->co_nfreevars"/>
+						<Variable Name="offset" InitialValue="f_code->co_nlocals + f_code->co_ncellvars"/>
+						<Variable Name="varnames" InitialValue="(python312.dll!PyTupleObject*)f_code->co_localsplusnames"/>
+						<Loop Condition="i &lt; nfrees">
+							<Item Name="{((python312.dll!_object**)varnames->ob_item)[offset + i],na}">localsplus[offset + i],na</Item>
+							<Exec>i = i + 1</Exec>
+						</Loop>
+					</CustomListItems>
+				</Expand>
+			</Synthetic>
+			
+			<!-- 栈变量 -->
+			<Synthetic Condition="stacktop &gt; f_code->co_nlocalsplus" Name="[stack]">
+				<DisplayString>value stack (size={stacktop - f_code->co_nlocalsplus})</DisplayString>
+				<Expand>
+					<CustomListItems>
+						<Variable Name="i" InitialValue="f_code->co_nlocalsplus"/>
+						<Variable Name="top" InitialValue="stacktop"/>
+						<Variable Name="idx" InitialValue="0"/>
+						<Loop Condition="i &lt; top">
+							<Item Name="[{idx}]">localsplus[i],na</Item>
+							<Exec>i = i + 1</Exec>
+							<Exec>idx = idx + 1</Exec>
+						</Loop>
+					</CustomListItems>
+				</Expand>
+			</Synthetic>
+			
+			<!-- 当前opcode对应行号 （参考PyCode_Addr2Line）-->
+			<CustomListItems>
+				<Variable Name="lasti" InitialValue="prev_instr - (_Py_CODEUNIT*)f_code->co_code_adaptive"/>
+				<Variable Name="addrq" InitialValue="lasti * 2"/>
+				<Variable Name="ar_start" InitialValue="-1"/>
+				<Variable Name="ar_end" InitialValue="0"/>
+				<Variable Name="ar_line" InitialValue="-1"/>
+				<Variable Name="computed_line" InitialValue="f_code->co_firstlineno"/>
+				<Variable Name="lo_next" InitialValue="(char*)0"/>
+				<Variable Name="limit" InitialValue="(char*)0"/>
+				<Variable Name="length" InitialValue="0" />
+				<Variable Name="code" InitialValue="0" />
+				<Variable Name="delta" InitialValue="0" />
+				<Variable Name="ptr" InitialValue="(char*)0" />
+				<Variable Name="read" InitialValue="0" />
+				<Variable Name="val" InitialValue="0" />
+				<Variable Name="uval" InitialValue="(unsigned int)0" />
+				<Variable Name="shift" InitialValue="0" />
+				<!-- if (addrq < 0) -->
+				<Exec Condition="addrq &lt; 0">
+					<!-- return co->co_firstlineno; -->
+					ar_line = f_code->co_firstlineno
+				</Exec>				
+				<!-- Use co_linetable for line number mapping -->
+				<If Condition="ar_line &lt; 0">
+					<!-- _PyCode_InitAddressRange(co, &bounds); -->
+					<Exec>length = ((python312.dll!PyBytesObject*)(f_code->co_linetable))->ob_base.ob_size</Exec>
+					<Exec>lo_next = (char*)(((python312.dll!PyBytesObject*)(f_code->co_linetable))->ob_sval)</Exec>
+					<Exec>limit = lo_next + length</Exec>
+					<!-- return _PyCode_CheckLineNumber(addrq, &bounds); -->
+					<Loop Condition="(ar_end &lt;= addrq) &amp;&amp; (lo_next &lt; limit)">
+						<!-- ↓ begin get_line_delta() -->
+						<Exec>delta = 0</Exec>
+						<Exec>code = ((*lo_next) &gt;&gt; 3) &amp; 15</Exec>
+						<If Condition="code == 13 || code == 14">
+							<!--太复杂了。。。-->
+							<Exec>ptr = lo_next + 1</Exec>
+							<Exec>read = *ptr++</Exec>
+							<Exec>val = read &amp; 63</Exec>
+							<Exec>shift = 0</Exec>
+							<Loop Condition="read &amp; 64">
+								<Exec>read = *ptr++</Exec>
+								<Exec>shift += 6</Exec>
+								<Exec>val |= (read &amp; 63) &lt;&lt; shift</Exec>
+							</Loop>
+							<Exec>uval = (unsigned int)val</Exec>
+							<Exec Condition="(uval &amp; 1)">val = -(int)(uval &gt;&gt; 1)</Exec>
+							<Exec Condition="!(uval &amp; 1)">val = uval &gt;&gt; 1</Exec>
+						</If>
+						<Exec Condition="code == 11">delta = 1</Exec>
+						<Exec Condition="code == 12">delta = 2</Exec>
+						<!-- ↑ end get_line_delta() -->
+						<Exec>computed_line += delta</Exec>
+						<Exec>ar_line = -1</Exec>
+						<Exec Condition="(lo_next[-1] &gt;&gt; 3) != 0x1f">ar_line = computed_line</Exec>
+						<Exec>ar_start = ar_end</Exec>
+						<!-- ↓ begin next_code_delta() -->
+						<Exec>delta = (((*lo_next) &amp; 7) + 1) * 2</Exec>
+						<!-- ↑ end next_code_delta() -->
+						<Exec>ar_end += delta</Exec>
+						<Loop>
+							<Exec>lo_next++</Exec>
+							<If Condition="(lo_next &gt;= limit) || (((*lo_next) &amp; 128) != 0) ">
+								<Break/>
+							</If>
+						</Loop>
+					</Loop>
+					<Loop Condition="(ar_start &gt; addrq) &amp;&amp; (ar_start &gt; 0)">
+						<Loop>
+							<Exec>lo_next--</Exec>
+							<If Condition="(((*lo_next) &amp; 128) != 0) ">
+								<Break/>
+							</If>
+						</Loop>
+						<!-- ↓ begin get_line_delta() -->
+						<Exec>delta = 0</Exec>
+						<Exec>code = ((*lo_next) &gt;&gt; 3) &amp; 15</Exec>
+						<!--<Item Name="&lt;code&gt;">code</Item>-->
+						<If Condition="code == 13 || code == 14">
+							<!--太复杂了。。。-->
+							<Exec>ptr = lo_next + 1</Exec>
+							<Exec>read = *ptr++</Exec>
+							<Exec>val = read &amp; 63</Exec>
+							<Exec>shift = 0</Exec>
+							<Loop Condition="read &amp; 64">
+								<Exec>read = *ptr++</Exec>
+								<Exec>shift += 6</Exec>
+								<Exec>val |= (read &amp; 63) &lt;&lt; shift</Exec>
+							</Loop>
+							<Exec>uval = (unsigned int)val</Exec>
+							<Exec Condition="(uval &amp; 1)">val = -(int)(uval &gt;&gt; 1)</Exec>
+							<Exec Condition="!(uval &amp; 1)">val = uval &gt;&gt; 1</Exec>
+						</If>
+						<Exec Condition="code == 11">delta = 1</Exec>
+						<Exec Condition="code == 12">delta = 2</Exec>
+						<!-- ↑ end get_line_delta() -->
+						<Exec>computed_line -= delta</Exec>
+						<Exec>ar_end = ar_start</Exec>
+						<!-- ↓ begin previous_code_delta() -->
+						<Exec Condition="ar_start == 0">delta = 1</Exec>
+						<If Condition="ar_start != 0">
+							<Exec>ptr = lo_next - 1</Exec>
+							<Loop Condition="((*ptr) &amp; 128) == 0">
+								<Exec>ptr--</Exec>
+							</Loop>
+							<Exec>delta = (((*ptr) &amp; 7) + 1) * 2</Exec>
+						</If>
+						<!-- ↑ end previous_code_delta() -->
+						<Exec>ar_start -= delta</Exec>
+						<Exec>ar_line = -1</Exec>
+						<Exec Condition="(lo_next[-1] &gt;&gt; 3) != 0x1f">ar_line = computed_line</Exec>
+					</Loop>
+				</If>
+				<Item Name="[lineno]">ar_line</Item>
+			</CustomListItems>
+			<!-- 调用栈 -->
+			<Synthetic Name="[stacks]">
+				<DisplayString>↓↓↓ show all stacks ↓↓↓</DisplayString>
+				<Expand>
+					<CustomListItems MaxItemsPerView="1000">
+						<Variable Name="f" InitialValue="this" />
+						<Loop Condition="f != nullptr">
+							<Item>f</Item>
+							<Exec>f = f->previous</Exec>
+							<Break Condition="f == nullptr" />
+						</Loop>
+					</CustomListItems>
+				</Expand>
+			</Synthetic>
+		</Expand>
+	</Type>
+	
+	<!--PyThreadState / _ts-->
+	<Type Name="python312.dll!_ts">
+		<DisplayString Condition="gilstate_counter &gt; 0">(pythread) tid={thread_id} [GIL HELD: counter={gilstate_counter}]</DisplayString>
+		<DisplayString Condition="gilstate_counter == 0">(pythread) tid={thread_id} [no GIL]</DisplayString>
+		<Expand>
+			<!-- 线程基本信息 -->
+			<Item Name="[thread_id]">thread_id</Item>
+			<Item Name="[native_thread_id]">native_thread_id</Item>
+			<Item Name="[py_recursion_remaining]">py_recursion_remaining</Item>
+			<Item Name="[py_recursion_limit]">py_recursion_limit</Item>
+			<Item Name="[c_recursion_remaining]">c_recursion_remaining</Item>
+			
+			<!-- GIL 状态 -->
+			<Synthetic Name="[GIL State]">
+				<DisplayString Condition="gilstate_counter &gt; 0">GIL HELD (counter: {gilstate_counter})</DisplayString>
+				<DisplayString Condition="gilstate_counter == 0">No GIL</DisplayString>
+				<Expand>
+					<Item Name="[gilstate_counter]">gilstate_counter</Item>
+					<Item Name="[holds_gil]">gilstate_counter &gt; 0</Item>
+				</Expand>
+			</Synthetic>
+			
+			<!-- 解释器引用 -->
+			<Item Name="[interp]">interp</Item>
+			
+			<!-- 线程链表 -->
+			<Item Name="[prev]">prev</Item>
+			<Item Name="[next]">next</Item>
+			
+			<!-- Python 3.12+ 使用 cframe 结构 -->
+			<Item Name="[cframe]">cframe</Item>
+			<Item Name="[datastack_chunk]">datastack_chunk</Item>
+			<Item Name="[datastack_top]">datastack_top</Item>
+			<Item Name="[datastack_limit]">datastack_limit</Item>
+			
+			<!-- 异常状态 -->
+			<Synthetic Name="[Exception State]">
+				<DisplayString Condition="current_exception != nullptr">Exception: {current_exception,na}</DisplayString>
+				<DisplayString Condition="current_exception == nullptr">No exception</DisplayString>
+				<Expand>
+					<Item Name="[current_exception]">current_exception</Item>
+					<Item Name="[exc_state.exc_value]">exc_state.exc_value</Item>
+					<Item Name="[exc_state.previous_item]">exc_state.previous_item</Item>
+				</Expand>
+			</Synthetic>
+			
+			<!-- 跟踪和调试 -->
+			<Item Name="[c_profilefunc]">c_profilefunc</Item>
+			<Item Name="[c_tracefunc]">c_tracefunc</Item>
+			<Item Name="[c_profileobj]">c_profileobj</Item>
+			<Item Name="[c_traceobj]">c_traceobj</Item>
+			
+			<!-- 异步相关 -->
+			<Item Name="[async_exc]">async_exc</Item>
+			<Item Name="[async_gen_firstiter]">async_gen_firstiter</Item>
+			<Item Name="[async_gen_finalizer]">async_gen_finalizer</Item>
+			
+			<!-- 上下文变量 -->
+			<Item Name="[context]">context</Item>
+			<Item Name="[context_ver]">context_ver</Item>
+			
+			<!-- 垃圾回收 -->
+			<Item Name="[trash.delete_nesting]">trash.delete_nesting</Item>
+			<Item Name="[trash.delete_later]">trash.delete_later</Item>
+			
+			<!-- 线程状态标志 -->
+			<Item Name="[tracing]">tracing</Item>
+			<Item Name="[what_event]">what_event</Item>
+			
+			<!-- 调用栈深度 -->
+			<Synthetic Name="[Call Stack Info]">
+				<DisplayString>Python recursion: {py_recursion_limit - py_recursion_remaining}/{py_recursion_limit}, C recursion: {c_recursion_remaining} remaining</DisplayString>
+				<Expand>
+					<Item Name="[py_recursion_used]">py_recursion_limit - py_recursion_remaining</Item>
+					<Item Name="[py_recursion_limit]">py_recursion_limit</Item>
+					<Item Name="[c_recursion_remaining]">c_recursion_remaining</Item>
+				</Expand>
+			</Synthetic>
+			
+			<!-- Python 3.12+ 帧栈通过 cframe 访问 -->
+			<Synthetic Condition="cframe != nullptr &amp;&amp; cframe->current_frame != nullptr" Name="[Frame Stack]">
+				<DisplayString>Current frame: {cframe->current_frame,na}</DisplayString>
+				<Expand>
+					<Item Name="[current_frame]">cframe->current_frame</Item>
+					<CustomListItems MaxItemsPerView="100">
+						<Variable Name="frame" InitialValue="cframe->current_frame"/>
+						<Variable Name="depth" InitialValue="0"/>
+						<Loop Condition="frame != nullptr &amp;&amp; depth &lt; 1000">
+							<Item Name="[{depth}]">frame</Item>
+							<Exec>frame = frame->previous</Exec>
+							<Exec>depth = depth + 1</Exec>
+							<Break Condition="frame == nullptr"/>
+						</Loop>
+					</CustomListItems>
+				</Expand>
+			</Synthetic>
+			
+			<!-- 如果没有 cframe 或没有当前帧 -->
+			<Synthetic Condition="cframe == nullptr || cframe->current_frame == nullptr" Name="[Frame Stack]">
+				<DisplayString>No active frame</DisplayString>
+			</Synthetic>
+		</Expand>
+	</Type>
+</AutoVisualizer>

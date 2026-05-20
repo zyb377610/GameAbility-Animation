@@ -1,0 +1,28 @@
+# ====== UE5 编译 & 缓存 ======
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# ====== VS 临时文件 ======
+.vs/
+*.sln
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+*.opensdf
+
+# ====== UE 自动生成 ======
+/Content/Collections/
+/Content/Developers/
+
+# ====== Python ======
+__pycache__/
+*.pyc
+*.pyo
+
+# ====== 系统无关 ======
+Thumbs.db
+Desktop.ini
+.DS_Store
