@@ -1,28 +1,56 @@
-# ====== UE5 编译 & 缓存 ======
-Binaries/
-Intermediate/
-Saved/
-DerivedDataCache/
+# ====================================
+# UE5 官方 .gitignore (GitHub EpicGames)
+# 针对 C++ 项目 + 项目级插件 定制
+# ====================================
 
-# ====== VS 临时文件 ======
+# ====== Visual Studio ======
 .vs/
 *.sln
 *.suo
 *.user
+*.sdf
+*.opensdf
 *.VC.db
 *.VC.opendb
-*.opensdf
+.vsconfig
+
+# ====== Rider / CLion / Xcode ======
+.idea/
+*.xcworkspace
+*.xcuserdata
+*.xcodeproj
+
+# ====== UE5 编译产物（仅项目根级） ======
+/Binaries/
+/Intermediate/
+/Saved/
+/DerivedDataCache/
+Build/
+
+# ====== 插件：忽略编译中间文件 ======
+Plugins/*/Intermediate/
+
+# ====== 插件：忽略 .pdb 调试符号 ======
+Plugins/*/Binaries/**/*.pdb
+
+# ====== Python 缓存 ======
+__pycache__/
+*.pyc
+*.pyo
 
 # ====== UE 自动生成 ======
 /Content/Collections/
 /Content/Developers/
 
-# ====== Python ======
-__pycache__/
-*.pyc
-*.pyo
+# ====== 预编译资源 ======
+SourceArt/**/*.png
+SourceArt/**/*.tga
 
-# ====== 系统无关 ======
+# ====== 地图构建数据 ======
+*_BuiltData.uasset
+
+# ====== OS 杂物 ======
 Thumbs.db
 Desktop.ini
 .DS_Store
+*~
