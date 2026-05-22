@@ -21,9 +21,21 @@
       },
       {
         "title": "NePy 常用编程模式",
-        "description": "子类化 UE 类、属性定义、委托绑定、资源加载等常见使用模式和代码示例",
-        "tags": ["nepy", "pattern", "example", "subclassing"],
+        "description": "委托绑定、资产加载、Actor 遍历、Vector/Rotator/Transform、编辑器工具等常见使用模式",
+        "tags": ["nepy", "pattern", "example", "delegate", "asset"],
         "path": "nepy/usage-patterns"
+      },
+      {
+        "title": "NePy 类编写完整指南",
+        "description": "@ue.uclass / @ue.uproperty / @ue.ucomponent / @ue.ufunction / __init_default__ 的完整语法、常见错误和对比",
+        "tags": ["nepy", "uclass", "uproperty", "ucomponent", "ufunction", "class-authoring"],
+        "path": "nepy/class-authoring"
+      },
+      {
+        "title": "NePy 项目搭建与运行",
+        "description": "nepyinit.py 生命周期、import 链触发类注册、FindClass 两阶段 Spawn、热重载陷阱、项目骨架模板",
+        "tags": ["nepy", "project-setup", "nepyinit", "spawn", "hot-reload"],
+        "path": "nepy/project-setup"
       }
     ]
   }

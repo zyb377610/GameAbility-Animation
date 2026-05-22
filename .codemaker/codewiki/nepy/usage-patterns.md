@@ -2,7 +2,7 @@
 
 ## 子类化 UE 类
 
-使用 `@ue.uclass()` 装饰器子类化 UE 类，覆盖蓝图可重写方法：
+使用 `@ue.uclass()` 装饰器子类化 UE 类。**注意：`@ue.uclass()` 必须用，否则 UE 反射系统不会注册你的类。**
 
 ```python
 import ue
@@ -12,43 +12,42 @@ class MyActor(ue.Actor):
     """自定义 Actor"""
     
     def receive_begin_play(self):
-        """覆盖 BeginPlay"""
         ue.log(f"{self.get_name()} begin play from Python!")
         super().receive_begin_play()
     
     def receive_tick(self, delta_seconds: float):
-        """覆盖 Tick"""
         pass
 
+# 方法如需被蓝图/AnimNotify 调用，加 @ue.ufunction()
 @ue.uclass()
-class MyComponent(ue.ActorComponent):
-    """自定义 Component"""
+class MyAnimInstance(ue.AnimInstance):
     
-    def receive_begin_play(self):
+    @ue.ufunction()  # → BlueprintCallable
+    def on_some_event(self):
+        pass
+    
+    @ue.ufunction(override=True)  # → 覆盖父类 UFUNCTION
+    def ReceiveBeginPlay(self):
         pass
 ```
 
-## 定义 UProperty / UFunction
+## UProperty / UFUNCTION / UComponent 定义
+
+详见 [`class-authoring.md`](class-authoring.md)。这里只给最简示例：
 
 ```python
 @ue.uclass()
 class MyActor(ue.Actor):
-    # UProperty
-    health: float = 100.0
-    max_health: float = 100.0
-    owner_name: str = ""
-    target_actor: ue.Actor = None
-    enemy_list: ue.ArrayWrapper[ue.Actor] = None
-    config_map: ue.MapWrapper[str, float] = None
+    # UProperty — 必须用 ue.uproperty(默认值)
+    Health = ue.uproperty(100.0)
+    IsAlive = ue.uproperty(True)
     
-    # UFUNCTION
-    def take_damage(self, amount: float) -> None:
-        self.health -= amount
-        if self.health <= 0:
-            self.on_death()
+    # UComponent — 声明子组件
+    MyMesh = ue.ucomponent(ue.StaticMeshComponent)
     
-    def on_death(self) -> None:
-        ue.log(f"{self.get_name()} died!")
+    # CDO 初始化 — 用 __init_default__，不用 __init__
+    def __init_default__(self):
+        self.MyMesh.SetStaticMesh(...)
 ```
 
 ## 委托绑定
@@ -153,10 +152,11 @@ transform.scale3d = ue.Vector(1, 1, 2)
 ## 日志输出
 
 ```python
-ue.log("普通日志")
-ue.log_warning("警告日志")
-ue.log_error("错误日志")
-ue.print_string("屏幕打印")  # 打印到游戏屏幕
+ue.log("普通日志")           # 输出到 LogNePython
+ue.log_warning("警告日志")    # 输出到 LogNePython(Warning)
+print("Python print 也可用")  # print 也会输出到 LogNePython
+
+# ue.log_error 不存在！用 ue.log_warning 代替
 ```
 
 ## 编辑器工具
