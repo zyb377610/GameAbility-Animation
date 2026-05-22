@@ -1,0 +1,30 @@
+{
+  "codewiki": {
+    "entries": [
+      {
+        "title": "NePy 插件概述",
+        "description": "NePythonBinding (NePy) 插件的整体介绍、安装方式和基本使用流程",
+        "tags": ["nepy", "python", "ue", "plugin", "overview"],
+        "path": "nepy/overview"
+      },
+      {
+        "title": "NePy API Stubs 结构指南",
+        "description": "UE Python API 类型桩(stubs)文件的组织结构，如何查找具体的类、枚举、结构体和函数",
+        "tags": ["nepy", "api", "stubs", "reference"],
+        "path": "nepy/api-stubs"
+      },
+      {
+        "title": "NePy 内置类型参考",
+        "description": "ArrayWrapper、MapWrapper、委托、软引用等 NePy 内置封装类型的 API 参考",
+        "tags": ["nepy", "builtin", "types", "container", "delegate"],
+        "path": "nepy/builtin-types"
+      },
+      {
+        "title": "NePy 常用编程模式",
+        "description": "子类化 UE 类、属性定义、委托绑定、资源加载等常见使用模式和代码示例",
+        "tags": ["nepy", "pattern", "example", "subclassing"],
+        "path": "nepy/usage-patterns"
+      }
+    ]
+  }
+}
