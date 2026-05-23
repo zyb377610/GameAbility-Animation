@@ -19,7 +19,11 @@ def on_init():
         except Exception:
             traceback.print_exc()
 
-    # ---- 将来在此处导入本项目自己的 GAS / Animation 脚本模块 ----
+    # ---- GAS / Animation 脚本模块 ----
+    try:
+        import gas.setup_character
+    except Exception:
+        traceback.print_exc()
 
 
 def on_shutdown():
