@@ -33,11 +33,18 @@
 #include "Subsystems/EditorActorSubsystem.h"
 #include "Misc/OutputDeviceRedirector.h"
 #include "FileHelpers.h"
+#include "Settings/LevelEditorPlaySettings.h"
 #include "Misc/DateTime.h"
 #include "HAL/FileManager.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "EditorValidatorSubsystem.h"
+#include "SceneView.h"
+#include "Components/PrimitiveComponent.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
+#include "Materials/MaterialInterface.h"
+#include "CollisionQueryParams.h"
+#include "Engine/HitResult.h"
 #include "GenericPlatform/GenericPlatformCrashContext.h"
 #if PLATFORM_WINDOWS
 #include "ILiveCodingModule.h"
@@ -47,6 +54,10 @@
 #include "DesktopPlatformModule.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/MonitoredProcess.h"
+#include "HandlerJsonProperty.h"
+#include "Engine/Blueprint.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
 
 void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 {
@@ -58,8 +69,9 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("run_python_file"), &RunPythonFile);
 	Registry.RegisterHandler(TEXT("set_property"), &SetProperty);
 	Registry.RegisterHandler(TEXT("set_config"), &SetConfig);
-	Registry.RegisterHandler(TEXT("read_config"), &ReadConfig);
 	Registry.RegisterHandler(TEXT("get_viewport_info"), &GetViewportInfo);
+	Registry.RegisterHandler(TEXT("hit_test_viewport_pixel"), &HitTestViewportPixel);
+	Registry.RegisterHandler(TEXT("get_runtime_values"), &GetRuntimeValues);
 	Registry.RegisterHandler(TEXT("get_editor_performance_stats"), &GetEditorPerformanceStats);
 	Registry.RegisterHandler(TEXT("get_output_log"), &GetOutputLog);
 	Registry.RegisterHandler(TEXT("search_log"), &SearchLog);
@@ -72,10 +84,8 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("redo"), &Redo);
 	Registry.RegisterHandler(TEXT("reload_handlers"), &ReloadHandlers);
 	Registry.RegisterHandler(TEXT("save_asset"), &SaveAsset);
-	Registry.RegisterHandler(TEXT("save_all"), &SaveAll);
-	Registry.RegisterHandler(TEXT("get_crash_reports"), &GetCrashReports);
-	Registry.RegisterHandler(TEXT("read_editor_log"), &ReadEditorLog);
-	Registry.RegisterHandler(TEXT("pie_get_runtime_value"), &PieGetRuntimeValue);
+	Registry.RegisterHandler(TEXT("save_dirty"), &SaveDirty);
+	Registry.RegisterHandler(TEXT("list_dirty_packages"), &ListDirtyPackages);
 	Registry.RegisterHandler(TEXT("build_lighting"), &BuildLighting);
 	Registry.RegisterHandler(TEXT("build_all"), &BuildAll);
 	Registry.RegisterHandler(TEXT("validate_assets"), &ValidateAssets);
@@ -85,7 +95,6 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_new_level"), &CreateNewLevel);
 	Registry.RegisterHandler(TEXT("save_current_level"), &SaveCurrentLevel);
 	Registry.RegisterHandler(TEXT("open_asset"), &OpenAsset);
-	// Aliases for TS tool compatibility
 	Registry.RegisterHandler(TEXT("get_runtime_value"), &PieGetRuntimeValue);
 	// New handlers
 	Registry.RegisterHandler(TEXT("run_stat_command"), &RunStatCommand);
@@ -102,6 +111,10 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// #126: fast-forward PIE game time
 	Registry.RegisterHandler(TEXT("set_pie_time_scale"), &SetPieTimeScale);
 	Registry.RegisterHandler(TEXT("capture_scene_png"), &CaptureScenePng);
+	Registry.RegisterHandler(TEXT("get_pie_pawn"), &GetPiePawn);
+	Registry.RegisterHandler(TEXT("invoke_function"), &InvokeFunction);
+	Registry.RegisterHandler(TEXT("configure_pie"), &ConfigurePie);
+	Registry.RegisterHandler(TEXT("get_pie_config"), &GetPieConfig);
 }
 
 TSharedPtr<FJsonValue> FEditorHandlers::ExecuteCommand(const TSharedPtr<FJsonObject>& Params)
@@ -228,64 +241,71 @@ TSharedPtr<FJsonValue> FEditorHandlers::RunPythonFile(const TSharedPtr<FJsonObje
 
 TSharedPtr<FJsonValue> FEditorHandlers::SetProperty(const TSharedPtr<FJsonObject>& Params)
 {
+	// #221/#230: TS schema documents `objectPath` but the dispatcher only
+	// accepted `path`/`assetPath`. Take any of the three so callers using the
+	// schema as written don't bounce off "missing required parameter".
 	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+	if (!Params->TryGetStringField(TEXT("objectPath"), AssetPath))
+	{
+		if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+	}
 
 	FString PropertyName;
 	if (auto Err = RequireString(Params, TEXT("propertyName"), PropertyName)) return Err;
 
-	// Load asset
+	// Load asset (works for /Game/X.X full paths or short /Game/X paths).
 	UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
+	if (!Asset)
+	{
+		// Try the LoadAsset fallback so /Game/Foo (no .Foo suffix) resolves.
+		Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	}
 	if (!Asset)
 	{
 		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
 	}
 
-	// Get property
+	// #210/#211: many data assets are edited via their CDO when assetPath is a
+	// Blueprint generated class (e.g. /Game/Foo/BP_Bar.BP_Bar_C). If the loaded
+	// object is a UClass, redirect to its default object so set-property writes
+	// to the per-class defaults the user expects.
+	if (UClass* Cls = Cast<UClass>(Asset))
+	{
+		Asset = Cls->GetDefaultObject();
+	}
+	else if (UBlueprint* BP = Cast<UBlueprint>(Asset))
+	{
+		if (BP->GeneratedClass) Asset = BP->GeneratedClass->GetDefaultObject();
+	}
+
 	FProperty* Property = Asset->GetClass()->FindPropertyByName(*PropertyName);
 	if (!Property)
 	{
-		return MCPError(FString::Printf(TEXT("Property not found: %s"), *PropertyName));
+		return MCPError(FString::Printf(TEXT("Property '%s' not found on %s"), *PropertyName, *Asset->GetClass()->GetName()));
 	}
 
-	// Get value from params
 	TSharedPtr<FJsonValue> ValueJsonRef = Params->TryGetField(TEXT("value"));
 	if (!ValueJsonRef.IsValid())
 	{
 		return MCPError(TEXT("Missing 'value' parameter"));
 	}
 
-	// Set property value — use ImportText_Direct for full UE text format support (#29)
-	// This handles nested struct arrays, FVector, FGameplayTag, TArray<>, etc.
 	void* PropertyValue = Property->ContainerPtrToValuePtr<void>(Asset);
+	Asset->Modify();
 
-	FString ValueStr;
-	if (ValueJsonRef->Type == EJson::String)
+	// #210/#221: route through the recursive setter so JSON objects, arrays,
+	// asset-path strings (FObjectProperty), and nested structs all apply
+	// without callers having to pre-format UE text.
+	FString SetErr;
+	if (!MCPJsonProperty::SetJsonOnProperty(Property, PropertyValue, ValueJsonRef, SetErr))
 	{
-		ValueStr = ValueJsonRef->AsString();
-	}
-	else if (ValueJsonRef->Type == EJson::Boolean)
-	{
-		ValueStr = ValueJsonRef->AsBool() ? TEXT("true") : TEXT("false");
-	}
-	else if (ValueJsonRef->Type == EJson::Number)
-	{
-		ValueStr = FString::SanitizeFloat(ValueJsonRef->AsNumber());
-	}
-	else
-	{
-		// For objects/arrays, serialize back to string for ImportText
-		// This lets callers pass UE text format as a string value
-		return MCPError(TEXT("Value must be a string (UE text format), number, or boolean. For complex types, pass UE text format as a string (e.g. '((Key=1,Value=\"Hello\"))' for struct arrays)."));
+		return MCPError(FString::Printf(TEXT("Failed to set '%s': %s"), *PropertyName, *SetErr));
 	}
 
-	const TCHAR* ImportResult = Property->ImportText_Direct(*ValueStr, PropertyValue, Asset, PPF_None);
-	if (!ImportResult)
-	{
-		return MCPError(FString::Printf(TEXT("ImportText failed for property '%s' with value '%s'. Check UE text format."), *PropertyName, *ValueStr));
-	}
-
+	FPropertyChangedEvent ChangeEvent(Property);
+	Asset->PostEditChangeProperty(ChangeEvent);
 	Asset->MarkPackageDirty();
+	UEditorAssetLibrary::SaveLoadedAsset(Asset, /*bOnlyIfIsDirty=*/true);
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
@@ -453,45 +473,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetConfig(const TSharedPtr<FJsonObject>&
 	return MCPResult(Result);
 }
 
-TSharedPtr<FJsonValue> FEditorHandlers::ReadConfig(const TSharedPtr<FJsonObject>& Params)
-{
-	FString ConfigName;
-	if (!Params->TryGetStringField(TEXT("configFile"), ConfigName))
-	{
-		Params->TryGetStringField(TEXT("configName"), ConfigName);
-	}
-	FString Section;
-	if (auto Err = RequireString(Params, TEXT("section"), Section)) return Err;
-	FString Key;
-	if (auto Err = RequireString(Params, TEXT("key"), Key)) return Err;
-
-	if (ConfigName.IsEmpty())
-	{
-		ConfigName = TEXT("DefaultEngine.ini");
-	}
-	else if (!ConfigName.EndsWith(TEXT(".ini")))
-	{
-		ConfigName = FString::Printf(TEXT("Default%s.ini"), *ConfigName);
-	}
-
-	FString ConfigDir = FPaths::ProjectConfigDir();
-	FString IniPath = FPaths::Combine(ConfigDir, ConfigName);
-
-	FString Value;
-	bool bFound = GConfig->GetString(*Section, *Key, Value, IniPath);
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("configFile"), ConfigName);
-	Result->SetStringField(TEXT("section"), Section);
-	Result->SetStringField(TEXT("key"), Key);
-	Result->SetBoolField(TEXT("found"), bFound);
-	if (bFound)
-	{
-		Result->SetStringField(TEXT("value"), Value);
-	}
-	return MCPResult(Result);
-}
-
 TSharedPtr<FJsonValue> FEditorHandlers::GetViewportInfo(const TSharedPtr<FJsonObject>& Params)
 {
 	if (!GEditor)
@@ -534,6 +515,148 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetViewportInfo(const TSharedPtr<FJsonOb
 	Result->SetObjectField(TEXT("rotation"), RotationObj);
 
 	Result->SetNumberField(TEXT("fov"), FOV);
+	return MCPResult(Result);
+}
+
+// ---------------------------------------------------------------------------
+// hit_test_viewport_pixel -- Ray-cast from a screen pixel through the active
+// editor viewport and return the first hit (#418). Replaces the bespoke
+// Python "build a ray, line trace, hope" workaround.
+// ---------------------------------------------------------------------------
+TSharedPtr<FJsonValue> FEditorHandlers::HitTestViewportPixel(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!GEditor)
+	{
+		return MCPError(TEXT("Editor not available"));
+	}
+
+	double PixelX = 0, PixelY = 0;
+	if (!Params->TryGetNumberField(TEXT("x"), PixelX) || !Params->TryGetNumberField(TEXT("y"), PixelY))
+	{
+		return MCPError(TEXT("Missing required parameters 'x' and 'y' (viewport pixel coordinates)"));
+	}
+
+	FLevelEditorViewportClient* ViewportClient = GCurrentLevelEditingViewportClient;
+	if (!ViewportClient)
+	{
+		const TArray<FLevelEditorViewportClient*>& ViewportClients = GEditor->GetLevelViewportClients();
+		if (ViewportClients.Num() > 0) ViewportClient = ViewportClients[0];
+	}
+	if (!ViewportClient || !ViewportClient->Viewport)
+	{
+		return MCPError(TEXT("No active editor viewport"));
+	}
+
+	// Viewport dimensions. Caller can override (e.g. when targeting a
+	// screenshot pixel coordinate space that differs from the live viewport).
+	FViewport* Viewport = ViewportClient->Viewport;
+	const FIntPoint ViewportSize = Viewport->GetSizeXY();
+	double Width = ViewportSize.X;
+	double Height = ViewportSize.Y;
+	Params->TryGetNumberField(TEXT("width"), Width);
+	Params->TryGetNumberField(TEXT("height"), Height);
+	if (Width <= 0 || Height <= 0)
+	{
+		return MCPError(FString::Printf(TEXT("Viewport size is zero (%dx%d) and no explicit width/height supplied. Focus the viewport, or pass width+height matching the screenshot used to pick the pixel."), ViewportSize.X, ViewportSize.Y));
+	}
+
+	// Build a SceneView matching the live viewport so DeprojectFVector2D uses
+	// the actual projection matrix instead of guessing FOV/aspect.
+	FSceneViewFamilyContext ViewFamily(FSceneViewFamily::ConstructionValues(
+		Viewport, ViewportClient->GetScene(), ViewportClient->EngineShowFlags)
+		.SetRealtimeUpdate(ViewportClient->IsRealtime()));
+	FSceneView* SceneView = ViewportClient->CalcSceneView(&ViewFamily);
+	if (!SceneView)
+	{
+		return MCPError(TEXT("Failed to construct SceneView for viewport"));
+	}
+
+	// If caller supplied width/height that differ from the actual viewport,
+	// rescale the pixel into the viewport's coordinate space so the ray is
+	// correct for the projection we built.
+	const double SX = ViewportSize.X / Width;
+	const double SY = ViewportSize.Y / Height;
+	const FVector2D ScreenPos((float)(PixelX * SX), (float)(PixelY * SY));
+
+	FVector RayOrigin, RayDirection;
+	SceneView->DeprojectFVector2D(ScreenPos, RayOrigin, RayDirection);
+
+	const double MaxDistance = OptionalNumber(Params, TEXT("maxDistance"), 200000.0);
+	const FVector RayEnd = RayOrigin + RayDirection * MaxDistance;
+
+	UWorld* World = ViewportClient->GetWorld();
+	if (!World)
+	{
+		return MCPError(TEXT("No world for active viewport"));
+	}
+
+	FCollisionQueryParams Query(SCENE_QUERY_STAT(MCPHitTestViewportPixel), /*bTraceComplex*/ true);
+	Query.bReturnPhysicalMaterial = true;
+	Query.bReturnFaceIndex = true;
+
+	// Optional ignore list by actor label.
+	const TArray<TSharedPtr<FJsonValue>>* IgnoreArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("ignoreActors"), IgnoreArr) && IgnoreArr)
+	{
+		for (const TSharedPtr<FJsonValue>& V : *IgnoreArr)
+		{
+			FString Label;
+			if (!V->TryGetString(Label)) continue;
+			if (AActor* A = FindActorByLabel(World, Label)) Query.AddIgnoredActor(A);
+		}
+	}
+
+	FHitResult Hit;
+	const bool bHit = World->LineTraceSingleByChannel(Hit, RayOrigin, RayEnd, ECC_Visibility, Query);
+
+	auto Result = MCPSuccess();
+	Result->SetBoolField(TEXT("hit"), bHit);
+	TSharedPtr<FJsonObject> RayObj = MakeShared<FJsonObject>();
+	TSharedPtr<FJsonObject> OriginObj = MakeShared<FJsonObject>();
+	OriginObj->SetNumberField(TEXT("x"), RayOrigin.X);
+	OriginObj->SetNumberField(TEXT("y"), RayOrigin.Y);
+	OriginObj->SetNumberField(TEXT("z"), RayOrigin.Z);
+	RayObj->SetObjectField(TEXT("origin"), OriginObj);
+	TSharedPtr<FJsonObject> DirObj = MakeShared<FJsonObject>();
+	DirObj->SetNumberField(TEXT("x"), RayDirection.X);
+	DirObj->SetNumberField(TEXT("y"), RayDirection.Y);
+	DirObj->SetNumberField(TEXT("z"), RayDirection.Z);
+	RayObj->SetObjectField(TEXT("direction"), DirObj);
+	Result->SetObjectField(TEXT("ray"), RayObj);
+
+	if (!bHit) return MCPResult(Result);
+
+	AActor* HitActor = Hit.GetActor();
+	UPrimitiveComponent* HitComp = Hit.GetComponent();
+	if (HitActor) Result->SetStringField(TEXT("actorLabel"), HitActor->GetActorLabel());
+	if (HitActor) Result->SetStringField(TEXT("actorClass"), HitActor->GetClass()->GetName());
+	if (HitComp)
+	{
+		Result->SetStringField(TEXT("componentName"), HitComp->GetName());
+		Result->SetStringField(TEXT("componentClass"), HitComp->GetClass()->GetName());
+		const int32 MatIndex = Hit.FaceIndex >= 0 && HitComp->GetNumMaterials() > 0 ? 0 : -1;
+		if (UMaterialInterface* Mat = (HitComp->GetNumMaterials() > 0 ? HitComp->GetMaterial(0) : nullptr))
+		{
+			Result->SetStringField(TEXT("materialPath"), Mat->GetPathName());
+		}
+	}
+
+	auto WriteVec = [&](const TCHAR* Field, const FVector& V)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetNumberField(TEXT("x"), V.X);
+		Obj->SetNumberField(TEXT("y"), V.Y);
+		Obj->SetNumberField(TEXT("z"), V.Z);
+		Result->SetObjectField(Field, Obj);
+	};
+	WriteVec(TEXT("location"), Hit.Location);
+	WriteVec(TEXT("impactPoint"), Hit.ImpactPoint);
+	WriteVec(TEXT("normal"), Hit.Normal);
+	WriteVec(TEXT("impactNormal"), Hit.ImpactNormal);
+	Result->SetNumberField(TEXT("distance"), Hit.Distance);
+	Result->SetNumberField(TEXT("faceIndex"), Hit.FaceIndex);
+	if (Hit.BoneName != NAME_None) Result->SetStringField(TEXT("boneName"), Hit.BoneName.ToString());
+	if (Hit.PhysMaterial.IsValid()) Result->SetStringField(TEXT("physicalMaterial"), Hit.PhysMaterial->GetPathName());
 	return MCPResult(Result);
 }
 
@@ -641,54 +764,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetBuildStatus(const TSharedPtr<FJsonObj
 	Result->SetStringField(TEXT("status"), TEXT("idle"));
 	return MCPResult(Result);
 }
-
-TSharedPtr<FJsonValue> FEditorHandlers::PieControl(const TSharedPtr<FJsonObject>& Params)
-{
-	FString Action;
-	if (auto Err = RequireString(Params, TEXT("action"), Action)) return Err;
-
-	if (!GEditor)
-	{
-		return MCPError(TEXT("Editor not available"));
-	}
-
-	auto Result = MCPSuccess();
-
-	if (Action == TEXT("status"))
-	{
-		bool bIsPlaying = (GEditor->PlayWorld != nullptr);
-		Result->SetBoolField(TEXT("isPlaying"), bIsPlaying);
-		Result->SetStringField(TEXT("action"), Action);
-	}
-	else if (Action == TEXT("start"))
-	{
-		if (GEditor->PlayWorld != nullptr)
-		{
-			return MCPError(TEXT("PIE session already active"));
-		}
-
-		FRequestPlaySessionParams SessionParams;
-		GEditor->RequestPlaySession(SessionParams);
-		Result->SetStringField(TEXT("action"), Action);
-	}
-	else if (Action == TEXT("stop"))
-	{
-		if (GEditor->PlayWorld == nullptr)
-		{
-			return MCPError(TEXT("No PIE session active"));
-		}
-
-		GEditor->RequestEndPlayMap();
-		Result->SetStringField(TEXT("action"), Action);
-	}
-	else
-	{
-		return MCPError(FString::Printf(TEXT("Unknown action: %s. Expected 'status', 'start', or 'stop'"), *Action));
-	}
-
-	return MCPResult(Result);
-}
-
 TSharedPtr<FJsonValue> FEditorHandlers::CaptureScreenshot(const TSharedPtr<FJsonObject>& Params)
 {
 	FString Filename;
@@ -704,6 +779,38 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScreenshot(const TSharedPtr<FJson
 	if (!GEditor)
 	{
 		return MCPError(TEXT("Editor not available"));
+	}
+
+	// #226: target=pie (or auto-detect when PIE is running) routes through
+	// HighResShot in the active PIE world so we capture the player viewport
+	// instead of whatever the editor camera was last looking at.
+	const FString Target = OptionalString(Params, TEXT("target"), TEXT("auto")).ToLower();
+	UWorld* PieWorld = nullptr;
+	if (FWorldContext* PieCtx = GEditor->GetPIEWorldContext())
+	{
+		PieWorld = PieCtx->World();
+	}
+	const bool bUsePie = (Target == TEXT("pie")) || (Target == TEXT("auto") && PieWorld);
+
+	if (bUsePie && PieWorld)
+	{
+		int32 Width = OptionalInt(Params, TEXT("width"), 1920);
+		int32 Height = OptionalInt(Params, TEXT("height"), 1080);
+		// Some callers pass a single 'resolution' (long edge); honour it as width.
+		double ResolutionScalar = 0.0;
+		if (Params->TryGetNumberField(TEXT("resolution"), ResolutionScalar) && ResolutionScalar > 0)
+		{
+			Width = (int32)ResolutionScalar;
+			Height = (int32)(ResolutionScalar * 9.0 / 16.0);
+		}
+		const FString ConsoleCmd = FString::Printf(TEXT("HighResShot %dx%d"), Width, Height);
+		GEngine->Exec(PieWorld, *ConsoleCmd);
+		auto Result = MCPSuccess();
+		Result->SetStringField(TEXT("filename"), Filename);
+		Result->SetStringField(TEXT("target"), TEXT("pie"));
+		Result->SetStringField(TEXT("consoleCommand"), ConsoleCmd);
+		Result->SetStringField(TEXT("note"), TEXT("HighResShot dispatched into PIE world; output lands in Saved/Screenshots/<map>/."));
+		return MCPResult(Result);
 	}
 
 	FLevelEditorViewportClient* ViewportClient = GCurrentLevelEditingViewportClient;
@@ -740,6 +847,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScreenshot(const TSharedPtr<FJson
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("filename"), FullPath);
+	Result->SetStringField(TEXT("target"), TEXT("editor"));
 	Result->SetStringField(TEXT("note"), TEXT("Screenshot queued. The file will be written asynchronously by the renderer."));
 	return MCPResult(Result);
 }
@@ -766,26 +874,13 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetViewportCamera(const TSharedPtr<FJson
 		return MCPError(TEXT("No viewport client available"));
 	}
 
-	// Set location if provided
-	const TSharedPtr<FJsonObject>* LocationObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("location"), LocationObj) && LocationObj)
+	if (Params->HasField(TEXT("location")))
 	{
-		FVector Location;
-		Location.X = (*LocationObj)->GetNumberField(TEXT("x"));
-		Location.Y = (*LocationObj)->GetNumberField(TEXT("y"));
-		Location.Z = (*LocationObj)->GetNumberField(TEXT("z"));
-		ViewportClient->SetViewLocation(Location);
+		ViewportClient->SetViewLocation(OptionalVec3(Params, TEXT("location")));
 	}
-
-	// Set rotation if provided
-	const TSharedPtr<FJsonObject>* RotationObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("rotation"), RotationObj) && RotationObj)
+	if (Params->HasField(TEXT("rotation")))
 	{
-		FRotator Rotation;
-		Rotation.Pitch = (*RotationObj)->GetNumberField(TEXT("pitch"));
-		Rotation.Yaw = (*RotationObj)->GetNumberField(TEXT("yaw"));
-		Rotation.Roll = (*RotationObj)->GetNumberField(TEXT("roll"));
-		ViewportClient->SetViewRotation(Rotation);
+		ViewportClient->SetViewRotation(OptionalRotator(Params, TEXT("rotation")));
 	}
 
 	auto Result = MCPSuccess();
@@ -843,420 +938,117 @@ TSharedPtr<FJsonValue> FEditorHandlers::SaveAsset(const TSharedPtr<FJsonObject>&
 	return MCPResult(Result);
 }
 
-TSharedPtr<FJsonValue> FEditorHandlers::SaveAll(const TSharedPtr<FJsonObject>& Params)
+// #378: drive UPackage::SavePackage directly on every dirty content package
+// so callers get a per-package result map. set_class_default and friends
+// occasionally leave packages dirty without persisting; this is the escape
+// hatch that surfaces which packages actually wrote to disk.
+TSharedPtr<FJsonValue> FEditorHandlers::SaveDirty(const TSharedPtr<FJsonObject>& Params)
 {
-	// Save all dirty packages using FEditorFileUtils
-	bool bPromptUserToSave = false;
-	bool bSaveMapPackages = true;
-	bool bSaveContentPackages = true;
-	bool bSuccess = FEditorFileUtils::SaveDirtyPackages(bPromptUserToSave, bSaveMapPackages, bSaveContentPackages);
+	const bool bIncludeMaps = OptionalBool(Params, TEXT("includeMaps"), true);
+	const bool bIncludeContent = OptionalBool(Params, TEXT("includeContent"), true);
 
-	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-	Result->SetBoolField(TEXT("success"), bSuccess);
-	Result->SetStringField(TEXT("message"), bSuccess ? TEXT("All dirty packages saved") : TEXT("Some packages may have failed to save"));
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FEditorHandlers::GetCrashReports(const TSharedPtr<FJsonObject>& Params)
-{
-	FString CrashesDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Crashes"));
-	IFileManager& FileManager = IFileManager::Get();
-
-	TArray<TSharedPtr<FJsonValue>> CrashesArray;
-
-	if (FileManager.DirectoryExists(*CrashesDir))
+	TArray<UPackage*> Dirty;
+	for (TObjectIterator<UPackage> It; It; ++It)
 	{
-		// Find all subdirectories in Crashes folder
-		TArray<FString> CrashFolders;
-		FileManager.FindFiles(CrashFolders, *FPaths::Combine(CrashesDir, TEXT("*")), false, true);
+		UPackage* Pkg = *It;
+		if (!Pkg || !Pkg->IsDirty()) continue;
+		const FString Name = Pkg->GetName();
+		const bool bIsMap = Pkg->ContainsMap();
+		if (bIsMap && !bIncludeMaps) continue;
+		if (!bIsMap && !bIncludeContent) continue;
+		// Skip code modules + transient packages - only flush content packages
+		// that live in mounted Content directories (have a resolvable .uasset
+		// filename). Engine code packages like /Script/Engine should never be
+		// touched by a content-save flush.
+		if (Name.StartsWith(TEXT("/Script/"))) continue;
+		if (Name.StartsWith(TEXT("/Temp/"))) continue;
+		if (!FPackageName::IsValidLongPackageName(Name)) continue;
+		Dirty.Add(Pkg);
+	}
 
-		for (const FString& FolderName : CrashFolders)
+	TArray<TSharedPtr<FJsonValue>> Saved;
+	TArray<TSharedPtr<FJsonValue>> Failed;
+
+	for (UPackage* Pkg : Dirty)
+	{
+		const FString PackageName = Pkg->GetName();
+		const FString Extension = Pkg->ContainsMap()
+			? FPackageName::GetMapPackageExtension()
+			: FPackageName::GetAssetPackageExtension();
+		FString FileName;
+		if (!FPackageName::TryConvertLongPackageNameToFilename(PackageName, FileName, Extension))
 		{
-			FString FolderPath = FPaths::Combine(CrashesDir, FolderName);
-
-			TSharedPtr<FJsonObject> CrashObj = MakeShared<FJsonObject>();
-			CrashObj->SetStringField(TEXT("folder"), FolderName);
-			CrashObj->SetStringField(TEXT("path"), FolderPath);
-
-			// Get folder timestamp
-			FDateTime TimeStamp = FileManager.GetTimeStamp(*FolderPath);
-			if (TimeStamp != FDateTime::MinValue())
-			{
-				CrashObj->SetStringField(TEXT("timestamp"), TimeStamp.ToString());
-			}
-
-			// List files inside the crash folder
-			TArray<FString> CrashFiles;
-			FileManager.FindFiles(CrashFiles, *FPaths::Combine(FolderPath, TEXT("*")), true, false);
-
-			TArray<TSharedPtr<FJsonValue>> FilesArray;
-			for (const FString& FileName : CrashFiles)
-			{
-				FilesArray.Add(MakeShared<FJsonValueString>(FileName));
-			}
-			CrashObj->SetArrayField(TEXT("files"), FilesArray);
-
-			CrashesArray.Add(MakeShared<FJsonValueObject>(CrashObj));
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("package"), PackageName);
+			Entry->SetStringField(TEXT("error"), TEXT("could not resolve on-disk filename"));
+			Failed.Add(MakeShared<FJsonValueObject>(Entry));
+			continue;
 		}
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("crashesDir"), CrashesDir);
-	Result->SetNumberField(TEXT("crashCount"), CrashesArray.Num());
-	Result->SetArrayField(TEXT("crashes"), CrashesArray);
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FEditorHandlers::ReadEditorLog(const TSharedPtr<FJsonObject>& Params)
-{
-	// Parameters
-	int32 LastN = OptionalInt(Params, TEXT("lastN"), 100);
-	FString Filter = OptionalString(Params, TEXT("filter"));
-
-	// Locate the editor log file
-	FString LogDir = FPaths::ProjectLogDir();
-	FString LogFilePath = FPaths::Combine(LogDir, TEXT("Editor.log"));
-
-	// If Editor.log doesn't exist, try the current log file
-	if (!FPaths::FileExists(LogFilePath))
-	{
-		LogFilePath = FPaths::Combine(LogDir, FString(FApp::GetProjectName()) + TEXT(".log"));
-	}
-
-	if (!FPaths::FileExists(LogFilePath))
-	{
-		return MCPError(FString::Printf(TEXT("Editor log file not found in %s"), *LogDir));
-	}
-
-	// Read the log file into lines
-	TArray<FString> AllLines;
-	if (!FFileHelper::LoadFileToStringArray(AllLines, *LogFilePath))
-	{
-		return MCPError(TEXT("Failed to read editor log file"));
-	}
-
-	// Apply filter and take last N lines
-	TArray<FString> ResultLines;
-	if (Filter.IsEmpty())
-	{
-		// No filter - take the last N lines directly
-		int32 StartIndex = FMath::Max(0, AllLines.Num() - LastN);
-		for (int32 i = StartIndex; i < AllLines.Num(); ++i)
+		FSavePackageArgs SaveArgs;
+		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+		SaveArgs.Error = GError;
+		const bool bOk = UPackage::SavePackage(Pkg, nullptr, *FileName, SaveArgs);
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("package"), PackageName);
+		Entry->SetStringField(TEXT("file"), FileName);
+		Entry->SetBoolField(TEXT("isMap"), Pkg->ContainsMap());
+		if (bOk)
 		{
-			ResultLines.Add(AllLines[i]);
-		}
-	}
-	else
-	{
-		// Filter lines (case-insensitive) then take last N
-		FString FilterLower = Filter.ToLower();
-		TArray<FString> FilteredLines;
-		for (const FString& Line : AllLines)
-		{
-			if (Line.ToLower().Contains(FilterLower))
-			{
-				FilteredLines.Add(Line);
-			}
-		}
-		int32 StartIndex = FMath::Max(0, FilteredLines.Num() - LastN);
-		for (int32 i = StartIndex; i < FilteredLines.Num(); ++i)
-		{
-			ResultLines.Add(FilteredLines[i]);
-		}
-	}
-
-	// Convert to JSON array
-	TArray<TSharedPtr<FJsonValue>> LinesArray;
-	for (const FString& Line : ResultLines)
-	{
-		LinesArray.Add(MakeShared<FJsonValueString>(Line));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("logFile"), LogFilePath);
-	Result->SetNumberField(TEXT("lineCount"), ResultLines.Num());
-	Result->SetNumberField(TEXT("totalLines"), AllLines.Num());
-	Result->SetArrayField(TEXT("lines"), LinesArray);
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FEditorHandlers::PieGetRuntimeValue(const TSharedPtr<FJsonObject>& Params)
-{
-	if (!GEditor)
-	{
-		return MCPError(TEXT("Editor not available"));
-	}
-
-	// Check if PIE is active
-	if (GEditor->PlayWorld == nullptr)
-	{
-		return MCPError(TEXT("PIE is not active. Start a PIE session first."));
-	}
-
-	FString ActorPath;
-	if (!Params->TryGetStringField(TEXT("actorPath"), ActorPath))
-	{
-		// Also accept actorLabel as a fallback
-		if (!Params->TryGetStringField(TEXT("actorLabel"), ActorPath))
-		{
-			return MCPError(TEXT("Missing 'actorPath' parameter"));
-		}
-	}
-
-	FString PropertyName;
-	if (auto Err = RequireString(Params, TEXT("propertyName"), PropertyName)) return Err;
-
-	// Search for the actor in the PIE world
-	UWorld* PIEWorld = GEditor->PlayWorld;
-	AActor* TargetActor = nullptr;
-
-	for (TActorIterator<AActor> It(PIEWorld); It; ++It)
-	{
-		AActor* Actor = *It;
-		if (Actor->GetName() == ActorPath ||
-			Actor->GetActorLabel() == ActorPath ||
-			Actor->GetPathName() == ActorPath)
-		{
-			TargetActor = Actor;
-			break;
-		}
-	}
-
-	if (!TargetActor)
-	{
-		// Collect available actor names for the error message
-		TArray<TSharedPtr<FJsonValue>> AvailableActors;
-		int32 Count = 0;
-		for (TActorIterator<AActor> It(PIEWorld); It && Count < 20; ++It, ++Count)
-		{
-			AvailableActors.Add(MakeShared<FJsonValueString>((*It)->GetActorLabel()));
-		}
-		TSharedPtr<FJsonObject> ErrResult = MakeShared<FJsonObject>();
-		ErrResult->SetBoolField(TEXT("success"), false);
-		ErrResult->SetStringField(TEXT("error"), FString::Printf(TEXT("Actor '%s' not found in PIE world"), *ActorPath));
-		ErrResult->SetArrayField(TEXT("availableActors"), AvailableActors);
-		return MCPResult(ErrResult);
-	}
-
-	// Find the property via reflection
-	FProperty* Property = TargetActor->GetClass()->FindPropertyByName(*PropertyName);
-	if (!Property)
-	{
-		return MCPError(FString::Printf(TEXT("Property '%s' not found on actor '%s'"), *PropertyName, *ActorPath));
-	}
-
-	// Read property value and serialize based on type
-	auto Result = MCPSuccess();
-	const void* PropertyValue = Property->ContainerPtrToValuePtr<void>(TargetActor);
-
-	if (FStrProperty* StrProp = CastField<FStrProperty>(Property))
-	{
-		FString Value = StrProp->GetPropertyValue(PropertyValue);
-		Result->SetStringField(TEXT("value"), Value);
-		Result->SetStringField(TEXT("type"), TEXT("String"));
-	}
-	else if (FBoolProperty* BoolProp = CastField<FBoolProperty>(Property))
-	{
-		bool Value = BoolProp->GetPropertyValue(PropertyValue);
-		Result->SetBoolField(TEXT("value"), Value);
-		Result->SetStringField(TEXT("type"), TEXT("Bool"));
-	}
-	else if (FIntProperty* IntProp = CastField<FIntProperty>(Property))
-	{
-		int32 Value = IntProp->GetPropertyValue(PropertyValue);
-		Result->SetNumberField(TEXT("value"), Value);
-		Result->SetStringField(TEXT("type"), TEXT("Int"));
-	}
-	else if (FFloatProperty* FloatProp = CastField<FFloatProperty>(Property))
-	{
-		float Value = FloatProp->GetPropertyValue(PropertyValue);
-		Result->SetNumberField(TEXT("value"), Value);
-		Result->SetStringField(TEXT("type"), TEXT("Float"));
-	}
-	else if (FDoubleProperty* DoubleProp = CastField<FDoubleProperty>(Property))
-	{
-		double Value = DoubleProp->GetPropertyValue(PropertyValue);
-		Result->SetNumberField(TEXT("value"), Value);
-		Result->SetStringField(TEXT("type"), TEXT("Double"));
-	}
-	else if (FNameProperty* NameProp = CastField<FNameProperty>(Property))
-	{
-		FName Value = NameProp->GetPropertyValue(PropertyValue);
-		Result->SetStringField(TEXT("value"), Value.ToString());
-		Result->SetStringField(TEXT("type"), TEXT("Name"));
-	}
-	else if (FTextProperty* TextProp = CastField<FTextProperty>(Property))
-	{
-		FText Value = TextProp->GetPropertyValue(PropertyValue);
-		Result->SetStringField(TEXT("value"), Value.ToString());
-		Result->SetStringField(TEXT("type"), TEXT("Text"));
-	}
-	else if (FStructProperty* StructProp = CastField<FStructProperty>(Property))
-	{
-		// Handle common struct types: FVector, FRotator, FLinearColor
-		if (StructProp->Struct == TBaseStructure<FVector>::Get())
-		{
-			const FVector* Vec = reinterpret_cast<const FVector*>(PropertyValue);
-			TSharedPtr<FJsonObject> VecObj = MakeShared<FJsonObject>();
-			VecObj->SetNumberField(TEXT("x"), Vec->X);
-			VecObj->SetNumberField(TEXT("y"), Vec->Y);
-			VecObj->SetNumberField(TEXT("z"), Vec->Z);
-			Result->SetObjectField(TEXT("value"), VecObj);
-			Result->SetStringField(TEXT("type"), TEXT("Vector"));
-		}
-		else if (StructProp->Struct == TBaseStructure<FRotator>::Get())
-		{
-			const FRotator* Rot = reinterpret_cast<const FRotator*>(PropertyValue);
-			TSharedPtr<FJsonObject> RotObj = MakeShared<FJsonObject>();
-			RotObj->SetNumberField(TEXT("pitch"), Rot->Pitch);
-			RotObj->SetNumberField(TEXT("yaw"), Rot->Yaw);
-			RotObj->SetNumberField(TEXT("roll"), Rot->Roll);
-			Result->SetObjectField(TEXT("value"), RotObj);
-			Result->SetStringField(TEXT("type"), TEXT("Rotator"));
-		}
-		else if (StructProp->Struct == TBaseStructure<FLinearColor>::Get())
-		{
-			const FLinearColor* Color = reinterpret_cast<const FLinearColor*>(PropertyValue);
-			TSharedPtr<FJsonObject> ColorObj = MakeShared<FJsonObject>();
-			ColorObj->SetNumberField(TEXT("r"), Color->R);
-			ColorObj->SetNumberField(TEXT("g"), Color->G);
-			ColorObj->SetNumberField(TEXT("b"), Color->B);
-			ColorObj->SetNumberField(TEXT("a"), Color->A);
-			Result->SetObjectField(TEXT("value"), ColorObj);
-			Result->SetStringField(TEXT("type"), TEXT("LinearColor"));
+			Saved.Add(MakeShared<FJsonValueObject>(Entry));
 		}
 		else
 		{
-			// Generic struct: export to string
-			FString ExportedValue;
-			Property->ExportTextItem_Direct(ExportedValue, PropertyValue, nullptr, nullptr, PPF_None);
-			Result->SetStringField(TEXT("value"), ExportedValue);
-			Result->SetStringField(TEXT("type"), StructProp->Struct->GetName());
+			Entry->SetStringField(TEXT("error"), TEXT("SavePackage returned false"));
+			Failed.Add(MakeShared<FJsonValueObject>(Entry));
 		}
 	}
-	else
-	{
-		// Fallback: export property value as string
-		FString ExportedValue;
-		Property->ExportTextItem_Direct(ExportedValue, PropertyValue, nullptr, nullptr, PPF_None);
-		Result->SetStringField(TEXT("value"), ExportedValue);
-		Result->SetStringField(TEXT("type"), Property->GetCPPType());
-	}
-
-	Result->SetStringField(TEXT("actorPath"), ActorPath);
-	Result->SetStringField(TEXT("propertyName"), PropertyName);
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FEditorHandlers::BuildLighting(const TSharedPtr<FJsonObject>& Params)
-{
-	REQUIRE_EDITOR_WORLD(World);
-
-	FString Quality = OptionalString(Params, TEXT("quality"), TEXT("Preview"));
-
-	// Map quality string to console command
-	FString Command;
-	if (Quality == TEXT("Preview"))
-	{
-		Command = TEXT("BUILD LIGHTING QUALITY=Preview");
-	}
-	else if (Quality == TEXT("Medium"))
-	{
-		Command = TEXT("BUILD LIGHTING QUALITY=Medium");
-	}
-	else if (Quality == TEXT("High"))
-	{
-		Command = TEXT("BUILD LIGHTING QUALITY=High");
-	}
-	else if (Quality == TEXT("Production"))
-	{
-		Command = TEXT("BUILD LIGHTING QUALITY=Production");
-	}
-	else
-	{
-		Command = TEXT("BUILD LIGHTING QUALITY=Preview");
-	}
-
-	UKismetSystemLibrary::ExecuteConsoleCommand(World, Command, nullptr);
 
 	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("quality"), Quality);
-	Result->SetStringField(TEXT("command"), Command);
-	Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Lighting build triggered (%s)"), *Quality));
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FEditorHandlers::BuildAll(const TSharedPtr<FJsonObject>& Params)
-{
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Execute full build: geometry, lighting, and paths
-	UKismetSystemLibrary::ExecuteConsoleCommand(World, TEXT("MAP REBUILD"), nullptr);
-	UKismetSystemLibrary::ExecuteConsoleCommand(World, TEXT("BUILD LIGHTING"), nullptr);
-	UKismetSystemLibrary::ExecuteConsoleCommand(World, TEXT("RebuildNavigation"), nullptr);
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("message"), TEXT("Build All triggered (geometry + lighting + navigation)"));
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FEditorHandlers::ValidateAssets(const TSharedPtr<FJsonObject>& Params)
-{
-	FString Directory = OptionalString(Params, TEXT("directory"), TEXT("/Game/"));
-
-	// Try to use the EditorValidatorSubsystem if available
-	UEditorValidatorSubsystem* ValidatorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UEditorValidatorSubsystem>() : nullptr;
-
-	if (ValidatorSubsystem)
+	Result->SetNumberField(TEXT("dirtyCount"), Dirty.Num());
+	Result->SetNumberField(TEXT("savedCount"), Saved.Num());
+	Result->SetNumberField(TEXT("failedCount"), Failed.Num());
+	Result->SetArrayField(TEXT("saved"), Saved);
+	if (Failed.Num() > 0)
 	{
-		// Use the DataValidation console command for broad validation
-		if (GEditor && GEditor->GetEditorWorldContext().World())
+		Result->SetArrayField(TEXT("failed"), Failed);
+		Result->SetBoolField(TEXT("success"), false);
+	}
+	return MCPResult(Result);
+}
+
+// #340: list every dirty package (content + map) so callers can audit
+// before flushing. Mirrors EditorLoadingAndSavingUtils.get_dirty_*_packages
+// without the Python escape.
+TSharedPtr<FJsonValue> FEditorHandlers::ListDirtyPackages(const TSharedPtr<FJsonObject>& Params)
+{
+	TArray<TSharedPtr<FJsonValue>> Content;
+	TArray<TSharedPtr<FJsonValue>> Maps;
+	for (TObjectIterator<UPackage> It; It; ++It)
+	{
+		UPackage* Pkg = *It;
+		if (!Pkg || !Pkg->IsDirty()) continue;
+		const FString Name = Pkg->GetName();
+		if (Name.StartsWith(TEXT("/Script/"))) continue;
+		if (Name.StartsWith(TEXT("/Temp/"))) continue;
+		if (!FPackageName::IsValidLongPackageName(Name)) continue;
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("package"), Name);
+		if (Pkg->ContainsMap())
 		{
-			FString Command = FString::Printf(TEXT("DataValidation.ValidateAssets %s"), *Directory);
-			UKismetSystemLibrary::ExecuteConsoleCommand(
-				GEditor->GetEditorWorldContext().World(),
-				Command,
-				nullptr
-			);
+			Maps.Add(MakeShared<FJsonValueObject>(Entry));
 		}
-
-		auto Result = MCPSuccess();
-		Result->SetStringField(TEXT("directory"), Directory);
-		Result->SetStringField(TEXT("message"), TEXT("Asset validation triggered via EditorValidatorSubsystem"));
-		return MCPResult(Result);
-	}
-	else
-	{
-		// Fallback: trigger via console command
-		if (GEditor && GEditor->GetEditorWorldContext().World())
+		else
 		{
-			UKismetSystemLibrary::ExecuteConsoleCommand(
-				GEditor->GetEditorWorldContext().World(),
-				TEXT("DataValidation.ValidateAssets"),
-				nullptr
-			);
+			Content.Add(MakeShared<FJsonValueObject>(Entry));
 		}
-
-		auto Result = MCPSuccess();
-		Result->SetStringField(TEXT("directory"), Directory);
-		Result->SetStringField(TEXT("message"), TEXT("Asset validation triggered via console command"));
-		return MCPResult(Result);
 	}
-}
-
-TSharedPtr<FJsonValue> FEditorHandlers::CookContent(const TSharedPtr<FJsonObject>& Params)
-{
-	REQUIRE_EDITOR_WORLD(World);
-
-	FString Platform = OptionalString(Params, TEXT("platform"), TEXT("Windows"));
-
-	FString Command = FString::Printf(TEXT("CookOnTheFly -TargetPlatform=%s"), *Platform);
-	UKismetSystemLibrary::ExecuteConsoleCommand(World, Command, nullptr);
 
 	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("platform"), Platform);
-	Result->SetStringField(TEXT("command"), Command);
-	Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Cook triggered for %s"), *Platform));
+	Result->SetNumberField(TEXT("contentCount"), Content.Num());
+	Result->SetNumberField(TEXT("mapCount"), Maps.Num());
+	Result->SetArrayField(TEXT("content"), Content);
+	Result->SetArrayField(TEXT("maps"), Maps);
 	return MCPResult(Result);
 }
 
@@ -1267,17 +1059,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::FocusViewportOnActor(const TSharedPtr<FJ
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	// Find the actor by label
-	AActor* TargetActor = nullptr;
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		if ((*It)->GetActorLabel() == ActorLabel)
-		{
-			TargetActor = *It;
-			break;
-		}
-	}
-
+	AActor* TargetActor = FindActorByLabel(World, ActorLabel);
 	if (!TargetActor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor '%s' not found"), *ActorLabel));
@@ -1326,45 +1108,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::FocusViewportOnActor(const TSharedPtr<FJ
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
 	return MCPResult(Result);
 }
-
-TSharedPtr<FJsonValue> FEditorHandlers::HotReload(const TSharedPtr<FJsonObject>& Params)
-{
-#if PLATFORM_WINDOWS
-	ILiveCodingModule* LiveCoding = FModuleManager::GetModulePtr<ILiveCodingModule>(LIVE_CODING_MODULE_NAME);
-	if (LiveCoding && LiveCoding->IsEnabledForSession())
-	{
-		if (LiveCoding->IsCompiling())
-		{
-			auto Result = MCPSuccess();
-			Result->SetStringField(TEXT("message"), TEXT("Live Coding compile already in progress"));
-			return MCPResult(Result);
-		}
-
-		LiveCoding->EnableByDefault(true);
-		LiveCoding->Compile();
-		auto Result = MCPSuccess();
-		Result->SetStringField(TEXT("message"), TEXT("Live Coding compile triggered"));
-		return MCPResult(Result);
-	}
-	else
-#endif
-	{
-		// Live Coding not available (or not on Windows) - fall back to console command
-		UWorld* World = GetEditorWorld();
-		if (World)
-		{
-			UKismetSystemLibrary::ExecuteConsoleCommand(World, TEXT("LiveCoding.Compile"), nullptr);
-			auto Result = MCPSuccess();
-			Result->SetStringField(TEXT("message"), TEXT("Hot reload triggered via console command (Live Coding module not active in session)"));
-			return MCPResult(Result);
-		}
-		else
-		{
-			return MCPError(TEXT("Neither Live Coding module nor editor world available for hot reload"));
-		}
-	}
-}
-
 TSharedPtr<FJsonValue> FEditorHandlers::CreateNewLevel(const TSharedPtr<FJsonObject>& Params)
 {
 	FString LevelPath = OptionalString(Params, TEXT("levelPath"));
@@ -1390,8 +1133,16 @@ TSharedPtr<FJsonValue> FEditorHandlers::CreateNewLevel(const TSharedPtr<FJsonObj
 		return MCPResult(Existed);
 	}
 
+	// #224: treat templateLevel="Empty" / "None" / "" as "no template",
+	// since callers reasonably read "Empty" as a sentinel for the empty
+	// template. NewLevelFromTemplate("/Game/X", "Empty") otherwise tries to
+	// load an asset literally named "Empty" and fails opaquely.
+	const bool bHasTemplate = !TemplateLevel.IsEmpty()
+		&& !TemplateLevel.Equals(TEXT("Empty"), ESearchCase::IgnoreCase)
+		&& !TemplateLevel.Equals(TEXT("None"), ESearchCase::IgnoreCase);
+
 	bool bSuccess = false;
-	if (TemplateLevel.IsEmpty())
+	if (!bHasTemplate)
 	{
 		bSuccess = LevelEditorSubsystem->NewLevel(LevelPath);
 	}
@@ -1402,7 +1153,25 @@ TSharedPtr<FJsonValue> FEditorHandlers::CreateNewLevel(const TSharedPtr<FJsonObj
 
 	if (!bSuccess)
 	{
-		return MCPError(FString::Printf(TEXT("Failed to create new level at: %s"), *LevelPath));
+		// #224: surface concrete reasons instead of a bare "Failed to create".
+		FString Reason;
+		if (LevelPath.IsEmpty())
+		{
+			Reason = TEXT("levelPath is required (e.g. \"/Game/Maps/MyLevel\")");
+		}
+		else if (!LevelPath.StartsWith(TEXT("/")))
+		{
+			Reason = FString::Printf(TEXT("levelPath must be a /Game/... mount point, got '%s'"), *LevelPath);
+		}
+		else if (bHasTemplate && !UEditorAssetLibrary::DoesAssetExist(TemplateLevel))
+		{
+			Reason = FString::Printf(TEXT("templateLevel asset not found: '%s' (omit or pass \"Empty\" for an empty level)"), *TemplateLevel);
+		}
+		else
+		{
+			Reason = FString::Printf(TEXT("LevelEditorSubsystem refused to create '%s' (path may be invalid, locked, or already open elsewhere)"), *LevelPath);
+		}
+		return MCPError(Reason);
 	}
 
 	auto Result = MCPSuccess();
@@ -1538,29 +1307,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetScalability(const TSharedPtr<FJsonObj
 	Result->SetStringField(TEXT("level"), Level);
 	return MCPResult(Result);
 }
-
-TSharedPtr<FJsonValue> FEditorHandlers::BuildGeometry(const TSharedPtr<FJsonObject>& Params)
-{
-	REQUIRE_EDITOR_WORLD(World);
-
-	GEditor->Exec(World, TEXT("MAP REBUILD"));
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("message"), TEXT("Geometry rebuild triggered"));
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FEditorHandlers::BuildHlod(const TSharedPtr<FJsonObject>& Params)
-{
-	REQUIRE_EDITOR_WORLD(World);
-
-	GEditor->Exec(World, TEXT("BuildHLOD"));
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("message"), TEXT("HLOD build triggered"));
-	return MCPResult(Result);
-}
-
 TSharedPtr<FJsonValue> FEditorHandlers::ListCrashes(const TSharedPtr<FJsonObject>& Params)
 {
 	FString CrashesDir = FPaths::ProjectSavedDir() / TEXT("Crashes");
@@ -1687,195 +1433,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::CheckForCrashes(const TSharedPtr<FJsonOb
 	Result->SetArrayField(TEXT("recentCrashes"), RecentCrashes);
 	return MCPResult(Result);
 }
-
-// #14: Build project via UnrealBuildTool
-TSharedPtr<FJsonValue> FEditorHandlers::BuildProject(const TSharedPtr<FJsonObject>& Params)
-{
-	if (!GEditor)
-	{
-		return MCPError(TEXT("Editor not available"));
-	}
-
-	FString Configuration = OptionalString(Params, TEXT("configuration"), TEXT("Development"));
-	FString Platform = OptionalString(Params, TEXT("platform"), TEXT("Win64"));
-	bool bClean = OptionalBool(Params, TEXT("clean"), false);
-
-	// Build the project by invoking the engine's build tool
-	// Use the project path from the running editor
-	FString ProjectPath = FPaths::GetProjectFilePath();
-	if (ProjectPath.IsEmpty())
-	{
-		return MCPError(TEXT("No project file path available"));
-	}
-
-	// Find UnrealBuildTool
-	FString EngineDir = FPaths::EngineDir();
-	FString UBTPath;
-
-#if PLATFORM_WINDOWS
-	UBTPath = FPaths::Combine(EngineDir, TEXT("Binaries"), TEXT("DotNET"), TEXT("UnrealBuildTool"), TEXT("UnrealBuildTool.exe"));
-	if (!FPaths::FileExists(UBTPath))
-	{
-		// Try legacy path
-		UBTPath = FPaths::Combine(EngineDir, TEXT("Binaries"), TEXT("DotNET"), TEXT("UnrealBuildTool.exe"));
-	}
-#else
-	UBTPath = FPaths::Combine(EngineDir, TEXT("Binaries"), TEXT("DotNET"), TEXT("UnrealBuildTool"), TEXT("UnrealBuildTool"));
-#endif
-
-	if (!FPaths::FileExists(UBTPath))
-	{
-		return MCPError(FString::Printf(TEXT("UnrealBuildTool not found at '%s'"), *UBTPath));
-	}
-
-	// Build the command line
-	FString ProjectName = FPaths::GetBaseFilename(ProjectPath);
-	FString Args = FString::Printf(
-		TEXT("%sEditor %s %s -Project=\"%s\" -WaitMutex -FromMsBuild"),
-		*ProjectName, *Platform, *Configuration, *ProjectPath);
-
-	if (bClean)
-	{
-		Args += TEXT(" -Clean");
-	}
-
-	// Launch the process asynchronously
-	FProcHandle ProcHandle = FPlatformProcess::CreateProc(
-		*UBTPath, *Args, true, false, false, nullptr, 0, nullptr, nullptr);
-
-	if (!ProcHandle.IsValid())
-	{
-		return MCPError(TEXT("Failed to launch UnrealBuildTool"));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("ubtPath"), UBTPath);
-	Result->SetStringField(TEXT("args"), Args);
-	Result->SetStringField(TEXT("configuration"), Configuration);
-	Result->SetStringField(TEXT("platform"), Platform);
-	Result->SetStringField(TEXT("note"), TEXT("Build launched asynchronously. Check output log for progress."));
-	return MCPResult(Result);
-}
-
-// #49: Generate VS project files
-TSharedPtr<FJsonValue> FEditorHandlers::GenerateProjectFiles(const TSharedPtr<FJsonObject>& Params)
-{
-	FString ProjectPath = FPaths::GetProjectFilePath();
-	if (ProjectPath.IsEmpty())
-	{
-		return MCPError(TEXT("No project file path available"));
-	}
-
-	// Find the GenerateProjectFiles script
-	FString EngineDir = FPaths::EngineDir();
-	FString ScriptPath;
-#if PLATFORM_WINDOWS
-	ScriptPath = FPaths::Combine(EngineDir, TEXT("Build"), TEXT("BatchFiles"), TEXT("GenerateProjectFiles.bat"));
-#elif PLATFORM_MAC
-	ScriptPath = FPaths::Combine(EngineDir, TEXT("Build"), TEXT("BatchFiles"), TEXT("Mac"), TEXT("GenerateProjectFiles.sh"));
-#else
-	ScriptPath = FPaths::Combine(EngineDir, TEXT("Build"), TEXT("BatchFiles"), TEXT("Linux"), TEXT("GenerateProjectFiles.sh"));
-#endif
-
-	if (!FPaths::FileExists(ScriptPath))
-	{
-		// Alternative: use UnrealBuildTool directly with -projectfiles flag
-		FString UBTPath;
-#if PLATFORM_WINDOWS
-		UBTPath = FPaths::Combine(EngineDir, TEXT("Binaries"), TEXT("DotNET"), TEXT("UnrealBuildTool"), TEXT("UnrealBuildTool.exe"));
-		if (!FPaths::FileExists(UBTPath))
-		{
-			UBTPath = FPaths::Combine(EngineDir, TEXT("Binaries"), TEXT("DotNET"), TEXT("UnrealBuildTool.exe"));
-		}
-#else
-		UBTPath = FPaths::Combine(EngineDir, TEXT("Binaries"), TEXT("DotNET"), TEXT("UnrealBuildTool"), TEXT("UnrealBuildTool"));
-#endif
-		if (!FPaths::FileExists(UBTPath))
-		{
-			return MCPError(TEXT("Neither GenerateProjectFiles script nor UnrealBuildTool found"));
-		}
-
-		FString Args = FString::Printf(TEXT("-projectfiles -project=\"%s\" -game -rocket -progress"), *ProjectPath);
-		FProcHandle ProcHandle = FPlatformProcess::CreateProc(
-			*UBTPath, *Args, true, false, false, nullptr, 0, nullptr, nullptr);
-
-		if (!ProcHandle.IsValid())
-		{
-			return MCPError(TEXT("Failed to launch UnrealBuildTool for project file generation"));
-		}
-
-		auto Result = MCPSuccess();
-		Result->SetStringField(TEXT("tool"), UBTPath);
-		Result->SetStringField(TEXT("args"), Args);
-		Result->SetStringField(TEXT("projectPath"), ProjectPath);
-		Result->SetStringField(TEXT("note"), TEXT("Project file generation launched. Check output log for progress."));
-		return MCPResult(Result);
-	}
-	else
-	{
-		FString Args = FString::Printf(TEXT("-project=\"%s\" -game"), *ProjectPath);
-		FProcHandle ProcHandle = FPlatformProcess::CreateProc(
-			*ScriptPath, *Args, true, false, false, nullptr, 0, nullptr, nullptr);
-
-		if (!ProcHandle.IsValid())
-		{
-			return MCPError(TEXT("Failed to launch GenerateProjectFiles"));
-		}
-
-		auto Result = MCPSuccess();
-		Result->SetStringField(TEXT("tool"), ScriptPath);
-		Result->SetStringField(TEXT("args"), Args);
-		Result->SetStringField(TEXT("projectPath"), ProjectPath);
-		Result->SetStringField(TEXT("note"), TEXT("Project file generation launched. Check output log for progress."));
-		return MCPResult(Result);
-	}
-}
-
-// #126: Fast-forward PIE game time. Raises WorldSettings dilation caps and calls SetGlobalTimeDilation.
-TSharedPtr<FJsonValue> FEditorHandlers::SetPieTimeScale(const TSharedPtr<FJsonObject>& Params)
-{
-	double Factor = 1.0;
-	if (!Params->TryGetNumberField(TEXT("factor"), Factor))
-	{
-		return MCPError(TEXT("Missing 'factor' (number) parameter"));
-	}
-	if (Factor <= 0.0)
-	{
-		return MCPError(TEXT("'factor' must be > 0"));
-	}
-
-	UWorld* World = GetPIEWorld();
-	if (!World)
-	{
-		return MCPError(TEXT("No PIE/Game world active — start PIE first"));
-	}
-
-	AWorldSettings* WS = World->GetWorldSettings();
-	if (!WS)
-	{
-		return MCPError(TEXT("WorldSettings not available on PIE world"));
-	}
-
-	// Raise dilation caps so Factor isn't clamped.
-	const float CapHigh = FMath::Max(1000.0f, (float)Factor * 2.0f);
-	WS->MaxGlobalTimeDilation = FMath::Max(WS->MaxGlobalTimeDilation, CapHigh);
-	WS->MinGlobalTimeDilation = FMath::Min(WS->MinGlobalTimeDilation, 0.0001f);
-
-	UGameplayStatics::SetGlobalTimeDilation(World, (float)Factor);
-
-	auto Result = MCPSuccess();
-	Result->SetNumberField(TEXT("factor"), Factor);
-	Result->SetNumberField(TEXT("maxCap"), WS->MaxGlobalTimeDilation);
-	Result->SetNumberField(TEXT("minCap"), WS->MinGlobalTimeDilation);
-	Result->SetStringField(TEXT("world"), World->GetName());
-	return MCPResult(Result);
-}
-
-// ─── #148 capture_scene_png ────────────────────────────────────────
-// Headless PNG screenshot via a reusable hidden SceneCapture2D actor.
-// Works when the editor window is not focused (unlike viewport
-// screenshots) and guarantees RGBA8 LDR PNG output suitable for image
-// readers that reject HDR/EXR.
 TSharedPtr<FJsonValue> FEditorHandlers::CaptureScenePng(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
@@ -1891,21 +1448,8 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScenePng(const TSharedPtr<FJsonOb
 
 	const double Fov = OptionalNumber(Params, TEXT("fov"), 90.0);
 
-	// Location / rotation
-	FVector Location = FVector::ZeroVector;
-	if (const TSharedPtr<FJsonObject>* LocObj = nullptr; Params->TryGetObjectField(TEXT("location"), LocObj) && LocObj && LocObj->IsValid())
-	{
-		(*LocObj)->TryGetNumberField(TEXT("x"), Location.X);
-		(*LocObj)->TryGetNumberField(TEXT("y"), Location.Y);
-		(*LocObj)->TryGetNumberField(TEXT("z"), Location.Z);
-	}
-	FRotator Rotation = FRotator::ZeroRotator;
-	if (const TSharedPtr<FJsonObject>* RotObj = nullptr; Params->TryGetObjectField(TEXT("rotation"), RotObj) && RotObj && RotObj->IsValid())
-	{
-		(*RotObj)->TryGetNumberField(TEXT("pitch"), Rotation.Pitch);
-		(*RotObj)->TryGetNumberField(TEXT("yaw"), Rotation.Yaw);
-		(*RotObj)->TryGetNumberField(TEXT("roll"), Rotation.Roll);
-	}
+	const FVector Location = OptionalVec3(Params, TEXT("location"));
+	const FRotator Rotation = OptionalRotator(Params, TEXT("rotation"));
 
 	// Find or spawn the reusable capture actor.
 	static const FString CaptureLabel = TEXT("__ClaudeSceneCapture");

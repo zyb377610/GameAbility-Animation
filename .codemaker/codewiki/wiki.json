@@ -36,6 +36,12 @@
         "description": "nepyinit.py 生命周期、import 链触发类注册、FindClass 两阶段 Spawn、热重载陷阱、项目骨架模板",
         "tags": ["nepy", "project-setup", "nepyinit", "spawn", "hot-reload"],
         "path": "nepy/project-setup"
+      },
+      {
+        "title": "NePy GAS 开发踩坑指南",
+        "description": "NePy中使用GAS的CDO限制、CommitAbility替代、蓝图加载方式、GE Modifiers配置、GameplayTag设置等关键踩坑记录",
+        "tags": ["nepy", "gas", "gameplay-ability", "pitfalls", "cdo", "commit-ability", "ge"],
+        "path": "nepy/gas-pitfalls"
       }
     ]
   }

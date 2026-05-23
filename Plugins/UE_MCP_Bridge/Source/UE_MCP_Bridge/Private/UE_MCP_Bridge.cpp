@@ -2,6 +2,11 @@
 #include "Modules/ModuleManager.h"
 #include "BridgeServer.h"
 #include "Handlers/DialogHandlers.h"
+#include "PIE/PIEInputInjector.h"
+#include "PIE/PIEInputRecorder.h"
+#include "PIE/PIEInputReplayer.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/CoreDelegates.h"
 #include "Containers/Ticker.h"
@@ -16,6 +21,15 @@ void FUE_MCP_BridgeModule::StartupModule()
 	// Create and start bridge server
 	G_BridgeServer = MakeShared<FMCPBridgeServer>(9877);
 	FDialogHandlers::InstallDialogHook();
+	UEMCPPIE::FPIEInputInjector::Init();
+	UEMCPPIE::FPIEInputRecorder::Get().Init();
+	UEMCPPIE::FPIEInputReplayer::Get().Init();
+	// Clear any leftover injections from a previous PIE session so a fresh
+	// EndPIE-BeginPIE pair starts with no ghost holds in the queue.
+	FEditorDelegates::EndPIE.AddLambda([](bool /*bIsSimulating*/)
+	{
+		UEMCPPIE::FPIEInputInjector::OnPIEEnded();
+	});
 	// Safety net: auto-decline overwrite dialogs to prevent game thread blocking.
 	// Handlers should check for existing assets before creating, but if a dialog
 	// slips through, decline it rather than blocking the game thread forever.
@@ -73,6 +87,23 @@ void FUE_MCP_BridgeModule::StartupModule()
 				G_BridgeServer->GetGameThreadExecutor().SetEditorReady();
 				UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Editor ready — accepting requests"));
 			}
+
+			// Opt out of the editor's unfocused-CPU throttle while a PIE
+			// recording or replay is in flight. UEditorEngine::GetMaxTickRate
+			// hard-codes 3 fps when ShouldThrottleCPUUsage() is true, which
+			// makes scripted PIE sessions (where the editor window doesn't
+			// have OS focus) sample at ~3 Hz regardless of sample_hz / pin_fps.
+			// The engine exposes ShouldDisableCPUThrottlingDelegates for
+			// exactly this case; returning true suppresses the throttle
+			// without mutating the user's project settings.
+			UEditorEngine::FShouldDisableCPUThrottling Suppress;
+			Suppress.BindLambda([]() -> bool
+			{
+				return UEMCPPIE::FPIEInputRecorder::Get().IsActive()
+				    || UEMCPPIE::FPIEInputReplayer::Get().IsActive();
+			});
+			GEditor->ShouldDisableCPUThrottlingDelegates.Add(Suppress);
+
 			return false; // done
 		})
 	);
@@ -82,6 +113,9 @@ void FUE_MCP_BridgeModule::ShutdownModule()
 {
 	// Stop bridge server
 	FDialogHandlers::RemoveDialogHook();
+	UEMCPPIE::FPIEInputReplayer::Get().Shutdown();
+	UEMCPPIE::FPIEInputRecorder::Get().Shutdown();
+	UEMCPPIE::FPIEInputInjector::Shutdown();
 
 	if (G_BridgeServer.IsValid())
 	{

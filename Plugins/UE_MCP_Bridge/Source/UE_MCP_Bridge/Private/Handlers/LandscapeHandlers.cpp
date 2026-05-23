@@ -7,6 +7,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Landscape.h"
+#include "LandscapeEditTypes.h"
 #include "LandscapeProxy.h"
 #include "LandscapeInfo.h"
 #include "LandscapeComponent.h"
@@ -32,13 +33,10 @@ void FLandscapeHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("sample_landscape"), &SampleLandscape);
 	Registry.RegisterHandler(TEXT("list_landscape_splines"), &ListLandscapeSplines);
 	Registry.RegisterHandler(TEXT("get_landscape_component"), &GetLandscapeComponent);
-	Registry.RegisterHandler(TEXT("sculpt_landscape"), &SculptLandscape);
-	Registry.RegisterHandler(TEXT("paint_landscape_layer"), &PaintLandscapeLayer);
-	Registry.RegisterHandler(TEXT("import_heightmap"), &ImportHeightmap);
 	Registry.RegisterHandler(TEXT("set_landscape_material"), &SetLandscapeMaterial);
-	Registry.RegisterHandler(TEXT("get_landscape_bounds"), &GetLandscapeBounds);
 	Registry.RegisterHandler(TEXT("add_landscape_layer_info"), &AddLandscapeLayerInfo);
-	Registry.RegisterHandler(TEXT("import_landscape_heightmap"), &ImportHeightmap);
+	Registry.RegisterHandler(TEXT("create_landscape"), &CreateLandscape);
+	Registry.RegisterHandler(TEXT("create_landscape_layer_info"), &CreateLandscapeLayerInfo);
 	Registry.RegisterHandler(TEXT("get_landscape_material_usage_summary"), &GetMaterialUsageSummary);
 }
 
@@ -292,204 +290,6 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::GetLandscapeComponent(const TSharedPt
 	return MCPResult(Result);
 }
 
-TSharedPtr<FJsonValue> FLandscapeHandlers::SculptLandscape(const TSharedPtr<FJsonObject>& Params)
-{
-	const TSharedPtr<FJsonObject>* LocationObj = nullptr;
-	if (!Params->TryGetObjectField(TEXT("location"), LocationObj) || !LocationObj || !(*LocationObj).IsValid())
-	{
-		return MCPError(TEXT("Missing 'location' parameter (object with x, y)"));
-	}
-
-	double LocX = 0, LocY = 0;
-	(*LocationObj)->TryGetNumberField(TEXT("x"), LocX);
-	(*LocationObj)->TryGetNumberField(TEXT("y"), LocY);
-
-	double SculptRadius = OptionalNumber(Params, TEXT("radius"), 500.0);
-	double Strength = OptionalNumber(Params, TEXT("strength"), 0.5);
-	FString Operation = OptionalString(Params, TEXT("operation"), TEXT("raise"));
-	double Falloff = OptionalNumber(Params, TEXT("falloff"), 0.5);
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Verify a landscape exists by line tracing at the target location
-	bool bFoundLandscape = false;
-	for (TActorIterator<ALandscapeProxy> It(World); It; ++It)
-	{
-		if (*It)
-		{
-			bFoundLandscape = true;
-			break;
-		}
-	}
-
-	if (!bFoundLandscape)
-	{
-		return MCPError(TEXT("No landscape found in the current level"));
-	}
-
-	// Landscape sculpting is not directly exposed as a simple C++ API.
-	// The LandscapeEdMode (editor mode) handles sculpting internally.
-	// Fall back to console command approach.
-	FString Command = FString::Printf(
-		TEXT("Landscape.Sculpt X=%.1f Y=%.1f Radius=%.1f Strength=%.2f Op=%s"),
-		LocX, LocY, SculptRadius, Strength, *Operation);
-
-	UKismetSystemLibrary::ExecuteConsoleCommand(World, Command, nullptr);
-
-	auto Result = MCPSuccess();
-	TSharedPtr<FJsonObject> LocationResult = MakeShared<FJsonObject>();
-	LocationResult->SetNumberField(TEXT("x"), LocX);
-	LocationResult->SetNumberField(TEXT("y"), LocY);
-	Result->SetObjectField(TEXT("location"), LocationResult);
-	Result->SetNumberField(TEXT("radius"), SculptRadius);
-	Result->SetNumberField(TEXT("strength"), Strength);
-	Result->SetStringField(TEXT("operation"), Operation);
-	Result->SetNumberField(TEXT("falloff"), Falloff);
-	Result->SetStringField(TEXT("note"), TEXT("Executed via console command. Verify visually. If the console command is not supported, use execute_python with unreal.LandscapeEditorLibrary.sculpt() instead."));
-	// No rollback: destructive/external — sculpting permanently alters heightmap.
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FLandscapeHandlers::PaintLandscapeLayer(const TSharedPtr<FJsonObject>& Params)
-{
-	FString LayerName;
-	if (auto Err = RequireString(Params, TEXT("layerName"), LayerName)) return Err;
-
-	const TSharedPtr<FJsonObject>* LocationObj = nullptr;
-	if (!Params->TryGetObjectField(TEXT("location"), LocationObj) || !LocationObj || !(*LocationObj).IsValid())
-	{
-		return MCPError(TEXT("Missing 'location' parameter (object with x, y)"));
-	}
-
-	double LocX = 0, LocY = 0;
-	(*LocationObj)->TryGetNumberField(TEXT("x"), LocX);
-	(*LocationObj)->TryGetNumberField(TEXT("y"), LocY);
-
-	double PaintRadius = OptionalNumber(Params, TEXT("radius"), 500.0);
-	double Strength = OptionalNumber(Params, TEXT("strength"), 1.0);
-	double Falloff = OptionalNumber(Params, TEXT("falloff"), 0.5);
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Verify a landscape exists
-	bool bFoundLandscape = false;
-	for (TActorIterator<ALandscapeProxy> It(World); It; ++It)
-	{
-		if (*It)
-		{
-			bFoundLandscape = true;
-			break;
-		}
-	}
-
-	if (!bFoundLandscape)
-	{
-		return MCPError(TEXT("No landscape found in the current level"));
-	}
-
-	// Landscape layer painting is internal to LandscapeEdMode.
-	// The C++ API for painting layers requires the landscape editor mode to be active
-	// and is not trivially accessible from plugins.
-	// Provide the fallback note for using execute_python.
-	auto Result = MakeShared<FJsonObject>();
-	TSharedPtr<FJsonObject> LocationResult = MakeShared<FJsonObject>();
-	LocationResult->SetNumberField(TEXT("x"), LocX);
-	LocationResult->SetNumberField(TEXT("y"), LocY);
-	Result->SetObjectField(TEXT("location"), LocationResult);
-	Result->SetStringField(TEXT("layerName"), LayerName);
-	Result->SetNumberField(TEXT("radius"), PaintRadius);
-	Result->SetNumberField(TEXT("strength"), Strength);
-	Result->SetNumberField(TEXT("falloff"), Falloff);
-
-	Result->SetBoolField(TEXT("success"), false);
-	Result->SetStringField(TEXT("note"),
-		TEXT("Landscape layer painting requires LandscapeEdMode which is not accessible from C++ plugins. ")
-		TEXT("Use the execute_python handler with unreal.LandscapeEditorLibrary.paint_layer() if available, ")
-		TEXT("or manually paint in the editor landscape tool."));
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FLandscapeHandlers::ImportHeightmap(const TSharedPtr<FJsonObject>& Params)
-{
-	FString FilePath;
-	if (auto Err = RequireString(Params, TEXT("filePath"), FilePath)) return Err;
-
-	// Verify the file exists
-	if (!FPaths::FileExists(FilePath))
-	{
-		return MCPError(FString::Printf(TEXT("File not found: %s"), *FilePath));
-	}
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Find the landscape
-	ALandscapeProxy* TargetLandscape = nullptr;
-	FString LandscapeName = OptionalString(Params, TEXT("landscapeName"));
-
-	for (TActorIterator<ALandscapeProxy> It(World); It; ++It)
-	{
-		ALandscapeProxy* Landscape = *It;
-		if (!Landscape) continue;
-
-		if (LandscapeName.IsEmpty() || Landscape->GetName() == LandscapeName)
-		{
-			TargetLandscape = Landscape;
-			break;
-		}
-	}
-
-	if (!TargetLandscape)
-	{
-		return MCPError(TEXT("No landscape found in the current level"));
-	}
-
-	// Read the heightmap file
-	TArray<uint8> FileData;
-	if (!FFileHelper::LoadFileToArray(FileData, *FilePath))
-	{
-		return MCPError(FString::Printf(TEXT("Failed to read file: %s"), *FilePath));
-	}
-
-	// Heightmap import requires the landscape editor subsystem which is internal to LandscapeEdMode.
-	// The raw heightmap data has been loaded successfully.
-	// Provide information about the file and a note about the import path.
-	auto Result = MakeShared<FJsonObject>();
-	Result->SetStringField(TEXT("filePath"), FilePath);
-	Result->SetNumberField(TEXT("fileSizeBytes"), FileData.Num());
-	Result->SetStringField(TEXT("landscapeName"), TargetLandscape->GetName());
-
-	// Determine if this looks like a 16-bit raw heightmap based on file size
-	int64 FileSize = FileData.Num();
-	bool bLooksLikeRaw16 = false;
-	int32 PossibleResolution = 0;
-	for (int32 Res = 127; Res <= 8161; Res += 2)
-	{
-		if (FileSize == (int64)Res * Res * 2)
-		{
-			bLooksLikeRaw16 = true;
-			PossibleResolution = Res;
-			break;
-		}
-	}
-
-	if (bLooksLikeRaw16)
-	{
-		Result->SetNumberField(TEXT("possibleResolution"), PossibleResolution);
-		Result->SetStringField(TEXT("format"), TEXT("RAW16"));
-	}
-
-	Result->SetBoolField(TEXT("success"), false);
-	Result->SetStringField(TEXT("note"),
-		TEXT("Heightmap file loaded and validated. Direct heightmap import requires LandscapeEditorUtils ")
-		TEXT("which is internal to the landscape editor module. Use the execute_python handler with ")
-		TEXT("unreal.LandscapeEditorLibrary.import_heightmap() if available, or import through the ")
-		TEXT("Landscape editor mode Import tool."));
-
-	return MCPResult(Result);
-}
-
 TSharedPtr<FJsonValue> FLandscapeHandlers::SetLandscapeMaterial(const TSharedPtr<FJsonObject>& Params)
 {
 	FString MaterialPath;
@@ -572,92 +372,6 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::SetLandscapeMaterial(const TSharedPtr
 		Payload->SetStringField(TEXT("materialPath"), PrevMaterial->GetPathName());
 		MCPSetRollback(Result, TEXT("set_landscape_material"), Payload);
 	}
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FLandscapeHandlers::GetLandscapeBounds(const TSharedPtr<FJsonObject>& Params)
-{
-	REQUIRE_EDITOR_WORLD(World);
-
-	FString LandscapeName = OptionalString(Params, TEXT("landscapeName"));
-
-	TArray<TSharedPtr<FJsonValue>> LandscapeBoundsArray;
-
-	for (TActorIterator<ALandscapeProxy> It(World); It; ++It)
-	{
-		ALandscapeProxy* Landscape = *It;
-		if (!Landscape) continue;
-
-		// Filter by name if specified
-		if (!LandscapeName.IsEmpty() && Landscape->GetName() != LandscapeName)
-		{
-			continue;
-		}
-
-		TSharedPtr<FJsonObject> LandscapeObj = MakeShared<FJsonObject>();
-		LandscapeObj->SetStringField(TEXT("name"), Landscape->GetName());
-
-		// Get actor bounds using GetActorBounds
-		FVector Origin;
-		FVector BoxExtent;
-		Landscape->GetActorBounds(false, Origin, BoxExtent);
-
-		TSharedPtr<FJsonObject> OriginObj = MakeShared<FJsonObject>();
-		OriginObj->SetNumberField(TEXT("x"), Origin.X);
-		OriginObj->SetNumberField(TEXT("y"), Origin.Y);
-		OriginObj->SetNumberField(TEXT("z"), Origin.Z);
-		LandscapeObj->SetObjectField(TEXT("origin"), OriginObj);
-
-		TSharedPtr<FJsonObject> ExtentObj = MakeShared<FJsonObject>();
-		ExtentObj->SetNumberField(TEXT("x"), BoxExtent.X);
-		ExtentObj->SetNumberField(TEXT("y"), BoxExtent.Y);
-		ExtentObj->SetNumberField(TEXT("z"), BoxExtent.Z);
-		LandscapeObj->SetObjectField(TEXT("boxExtent"), ExtentObj);
-
-		// Also provide min/max corners for convenience
-		FVector BoundsMin = Origin - BoxExtent;
-		FVector BoundsMax = Origin + BoxExtent;
-
-		TSharedPtr<FJsonObject> MinObj = MakeShared<FJsonObject>();
-		MinObj->SetNumberField(TEXT("x"), BoundsMin.X);
-		MinObj->SetNumberField(TEXT("y"), BoundsMin.Y);
-		MinObj->SetNumberField(TEXT("z"), BoundsMin.Z);
-		LandscapeObj->SetObjectField(TEXT("min"), MinObj);
-
-		TSharedPtr<FJsonObject> MaxObj = MakeShared<FJsonObject>();
-		MaxObj->SetNumberField(TEXT("x"), BoundsMax.X);
-		MaxObj->SetNumberField(TEXT("y"), BoundsMax.Y);
-		MaxObj->SetNumberField(TEXT("z"), BoundsMax.Z);
-		LandscapeObj->SetObjectField(TEXT("max"), MaxObj);
-
-		// Size
-		FVector Size = BoxExtent * 2.0;
-		TSharedPtr<FJsonObject> SizeObj = MakeShared<FJsonObject>();
-		SizeObj->SetNumberField(TEXT("x"), Size.X);
-		SizeObj->SetNumberField(TEXT("y"), Size.Y);
-		SizeObj->SetNumberField(TEXT("z"), Size.Z);
-		LandscapeObj->SetObjectField(TEXT("size"), SizeObj);
-
-		// Location
-		FVector Location = Landscape->GetActorLocation();
-		TSharedPtr<FJsonObject> LocationResultObj = MakeShared<FJsonObject>();
-		LocationResultObj->SetNumberField(TEXT("x"), Location.X);
-		LocationResultObj->SetNumberField(TEXT("y"), Location.Y);
-		LocationResultObj->SetNumberField(TEXT("z"), Location.Z);
-		LandscapeObj->SetObjectField(TEXT("location"), LocationResultObj);
-
-		LandscapeBoundsArray.Add(MakeShared<FJsonValueObject>(LandscapeObj));
-	}
-
-	if (LandscapeBoundsArray.Num() == 0)
-	{
-		return MCPError(TEXT("No landscape found in the current level"));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetArrayField(TEXT("landscapes"), LandscapeBoundsArray);
-	Result->SetNumberField(TEXT("count"), LandscapeBoundsArray.Num());
 
 	return MCPResult(Result);
 }
@@ -767,6 +481,194 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 // Compact per-proxy dump: class, label, material paths, grass / Nanite /
 // landscape component counts. Avoids the big "get all components" blob
 // get_actor_details produces when you only need materials + counts.
+// #303: spawn an ALandscape with a default flat heightmap at mid-elevation
+// (uint16 32768 = no offset). Section/quad defaults match the Editor's
+// Landscape Mode "create new" form: 63 quads/subsection, 2 subsections/component
+// = 127 quads/component. ComponentCount X/Y default to 8x8 producing a
+// 1016x1016 quad landscape (~1 km at default actor scale 100,100,100).
+TSharedPtr<FJsonValue> FLandscapeHandlers::CreateLandscape(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+
+	const int32 SubsectionSizeQuads = OptionalInt(Params, TEXT("subsectionSizeQuads"), 63);
+	const int32 NumSubsections = OptionalInt(Params, TEXT("numSubsections"), 2);
+	const int32 ComponentCountX = OptionalInt(Params, TEXT("componentCountX"), 8);
+	const int32 ComponentCountY = OptionalInt(Params, TEXT("componentCountY"), 8);
+
+	// Bounds checks: SubsectionSizeQuads must be one of the engine's supported
+	// values (7, 15, 31, 63, 127, 255), NumSubsections is 1 or 2, and the
+	// component grid has to be at least 1x1.
+	auto IsPowOf2Minus1 = [](int32 v) {
+		const int32 p = v + 1;
+		return v >= 7 && v <= 255 && (p & (p - 1)) == 0;
+	};
+	if (!IsPowOf2Minus1(SubsectionSizeQuads))
+	{
+		return MCPError(FString::Printf(
+			TEXT("subsectionSizeQuads must be one of 7, 15, 31, 63, 127, 255 (got %d)"),
+			SubsectionSizeQuads));
+	}
+	if (NumSubsections != 1 && NumSubsections != 2)
+	{
+		return MCPError(FString::Printf(TEXT("numSubsections must be 1 or 2 (got %d)"), NumSubsections));
+	}
+	if (ComponentCountX < 1 || ComponentCountY < 1)
+	{
+		return MCPError(TEXT("componentCountX and componentCountY must be >= 1"));
+	}
+
+	const int32 ComponentSizeQuads = SubsectionSizeQuads * NumSubsections;
+	const int32 SizeX = (ComponentCountX * ComponentSizeQuads) + 1;
+	const int32 SizeY = (ComponentCountY * ComponentSizeQuads) + 1;
+
+	const int32 HeightOffset = OptionalInt(Params, TEXT("heightOffset"), 32768);
+	if (HeightOffset < 0 || HeightOffset > 65535)
+	{
+		return MCPError(TEXT("heightOffset must be in [0, 65535] (uint16 elevation)"));
+	}
+
+	const FVector Location = OptionalVec3(Params, TEXT("location"));
+	const FVector Scale = OptionalVec3(Params, TEXT("scale"), FVector(100.0, 100.0, 100.0));
+
+	const FString Label = OptionalString(Params, TEXT("label"));
+
+	// Idempotency by label.
+	if (auto Existing = MCPCheckActorLabelExists(World, Label, TEXT("skip"), TEXT("Landscape")))
+	{
+		return Existing;
+	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	ALandscape* Landscape = World->SpawnActor<ALandscape>(Location, FRotator::ZeroRotator, SpawnParams);
+	if (!Landscape)
+	{
+		return MCPError(TEXT("Failed to spawn ALandscape actor"));
+	}
+	Landscape->SetActorScale3D(Scale);
+
+	// Allocate a flat heightmap. Layer 0 (FGuid()) is the only edit layer for a
+	// non-edit-layer landscape, which is what gets created by the Editor's
+	// "create new landscape" defaults.
+	TArray<uint16> HeightData;
+	HeightData.SetNumUninitialized(SizeX * SizeY);
+	for (int32 i = 0; i < HeightData.Num(); ++i)
+	{
+		HeightData[i] = static_cast<uint16>(HeightOffset);
+	}
+
+	TMap<FGuid, TArray<uint16>> ImportHeightData;
+	ImportHeightData.Add(FGuid(), MoveTemp(HeightData));
+
+	TMap<FGuid, TArray<FLandscapeImportLayerInfo>> ImportLayerInfo;
+	ImportLayerInfo.Add(FGuid(), TArray<FLandscapeImportLayerInfo>());
+
+	TArray<FLandscapeLayer> EmptyLayers;
+	Landscape->Import(
+		FGuid::NewGuid(),
+		0, 0,
+		SizeX - 1, SizeY - 1,
+		NumSubsections,
+		SubsectionSizeQuads,
+		ImportHeightData,
+		nullptr,
+		ImportLayerInfo,
+		ELandscapeImportAlphamapType::Additive,
+#if UE_MCP_HAS_5_5_API
+		MakeArrayView(EmptyLayers)
+#else
+		// 5.4: last arg is const TArray<FLandscapeLayer>* (TArrayView signature added in 5.5).
+		&EmptyLayers
+#endif
+	);
+
+	if (!Label.IsEmpty())
+	{
+		Landscape->SetActorLabel(Label);
+	}
+
+	// Register so subsequent get_landscape_info / sample_landscape calls find it.
+	if (ULandscapeInfo* LI = Landscape->GetLandscapeInfo())
+	{
+		LI->FixupProxiesTransform();
+		LI->RecreateCollisionComponents();
+	}
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("actorLabel"), Landscape->GetActorLabel());
+	Result->SetStringField(TEXT("actorPath"), Landscape->GetPathName());
+	Result->SetNumberField(TEXT("componentCountX"), ComponentCountX);
+	Result->SetNumberField(TEXT("componentCountY"), ComponentCountY);
+	Result->SetNumberField(TEXT("componentSizeQuads"), ComponentSizeQuads);
+	Result->SetNumberField(TEXT("subsectionSizeQuads"), SubsectionSizeQuads);
+	Result->SetNumberField(TEXT("numSubsections"), NumSubsections);
+	Result->SetNumberField(TEXT("sizeX"), SizeX);
+	Result->SetNumberField(TEXT("sizeY"), SizeY);
+
+	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("actorLabel"), Landscape->GetActorLabel());
+	MCPSetRollback(Result, TEXT("delete_actor"), Payload);
+
+	return MCPResult(Result);
+}
+
+// #251: standalone LayerInfo asset creation. Unlike add_landscape_layer_info
+// (which requires a landscape in the world to register the layer against),
+// this creates the ULandscapeLayerInfoObject asset in the content browser
+// so paint workflows can pre-author layer assets before the landscape exists.
+TSharedPtr<FJsonValue> FLandscapeHandlers::CreateLandscapeLayerInfo(const TSharedPtr<FJsonObject>& Params)
+{
+	FString LayerName;
+	if (auto Err = RequireString(Params, TEXT("layerName"), LayerName)) return Err;
+
+	const FString Name = OptionalString(Params, TEXT("name"), FString::Printf(TEXT("LI_%s"), *LayerName));
+	const FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Landscape/LayerInfos"));
+	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
+
+	TSharedPtr<FJsonValue> Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("LandscapeLayerInfoObject"));
+	if (Existing.IsValid()) return Existing;
+
+	const FString PackageFullPath = PackagePath / Name;
+	UPackage* Package = CreatePackage(*PackageFullPath);
+	if (!Package)
+	{
+		return MCPError(FString::Printf(TEXT("Failed to create package: %s"), *PackageFullPath));
+	}
+
+	ULandscapeLayerInfoObject* LayerInfo = NewObject<ULandscapeLayerInfoObject>(
+		Package, *Name, RF_Public | RF_Standalone);
+	if (!LayerInfo)
+	{
+		return MCPError(TEXT("Failed to create LandscapeLayerInfoObject"));
+	}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	LayerInfo->LayerName = FName(*LayerName);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+	// Optional hardness; physics material is settable via set_actor_property
+	// against the asset path (PhysicsCore is not a hard dep of this module).
+	double Hardness = 0.0;
+	if (Params->TryGetNumberField(TEXT("hardness"), Hardness))
+	{
+		LayerInfo->Hardness = static_cast<float>(Hardness);
+	}
+
+	FAssetRegistryModule::AssetCreated(LayerInfo);
+	Package->MarkPackageDirty();
+	SaveAssetPackage(LayerInfo);
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("path"), LayerInfo->GetPathName());
+	Result->SetStringField(TEXT("layerName"), LayerName);
+	Result->SetStringField(TEXT("packagePath"), PackagePath);
+	MCPSetDeleteAssetRollback(Result, LayerInfo->GetPathName());
+
+	return MCPResult(Result);
+}
+
 TSharedPtr<FJsonValue> FLandscapeHandlers::GetMaterialUsageSummary(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);

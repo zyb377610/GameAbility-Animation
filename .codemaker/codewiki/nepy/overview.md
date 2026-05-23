@@ -39,7 +39,7 @@ actor.set_actor_location(ue.Vector(100, 200, 300), False, False)
 @ue.uclass()
 class MyActor(ue.Actor):
     def receive_begin_play(self):
-        ue.log("Hello from Python!")
+        ue.Log("Hello from Python!")
 ```
 
 ## 热更新

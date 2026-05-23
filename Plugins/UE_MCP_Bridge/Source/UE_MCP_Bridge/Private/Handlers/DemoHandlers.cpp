@@ -84,6 +84,7 @@ namespace DemoConstants
 	static const FString FOLDER      = TEXT("Demo_Scene");
 	static const FString MAT_DIR     = TEXT("/Game/Demo");
 	static const FString DEMO_LEVEL  = TEXT("/Game/Demo/DemoLevel");
+	static const FString HOME_LEVEL  = TEXT("/Game/MCP_Home");
 	static const FString CUBE_MESH   = TEXT("/Engine/BasicShapes/Cube.Cube");
 	static const FString SPHERE_MESH = TEXT("/Engine/BasicShapes/Sphere.Sphere");
 	static const FString CYLINDER_MESH = TEXT("/Engine/BasicShapes/Cylinder.Cylinder");
@@ -97,6 +98,44 @@ void FDemoHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("demo_step"),      &DemoStep);
 	Registry.RegisterHandler(TEXT("demo_get_steps"), &DemoGetSteps);
 	Registry.RegisterHandler(TEXT("demo_cleanup"),   &DemoCleanup);
+	Registry.RegisterHandler(TEXT("demo_go_home"),   &DemoGoHome);
+}
+
+// Ensures /Game/MCP_Home exists on disk and loads it. Idempotent.
+bool FDemoHandlers::EnsureHomeLevelLoaded(FString& OutError)
+{
+	ULevelEditorSubsystem* LevelSub = GEditor ? GEditor->GetEditorSubsystem<ULevelEditorSubsystem>() : nullptr;
+	if (!LevelSub) { OutError = TEXT("LevelEditorSubsystem not available"); return false; }
+
+	if (!UEditorAssetLibrary::DoesAssetExist(DemoConstants::HOME_LEVEL))
+	{
+		// Create + save a blank level on disk so subsequent loads have a
+		// real package to anchor on (no Untitled state).
+		if (!LevelSub->NewLevel(DemoConstants::HOME_LEVEL))
+		{
+			OutError = FString::Printf(TEXT("NewLevel failed for %s"), *DemoConstants::HOME_LEVEL);
+			return false;
+		}
+		LevelSub->SaveCurrentLevel();
+	}
+	else
+	{
+		LevelSub->LoadLevel(DemoConstants::HOME_LEVEL);
+	}
+	return true;
+}
+
+// demo_go_home: switch the editor to /Game/MCP_Home (creating it on first use).
+TSharedPtr<FJsonValue> FDemoHandlers::DemoGoHome(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Err;
+	if (!EnsureHomeLevelLoaded(Err))
+	{
+		return MCPError(Err);
+	}
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("levelPath"), DemoConstants::HOME_LEVEL);
+	return MCPResult(Result);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +252,14 @@ TSharedPtr<FJsonValue> FDemoHandlers::DemoStep(const TSharedPtr<FJsonObject>& Pa
 // ---------------------------------------------------------------------------
 TSharedPtr<FJsonValue> FDemoHandlers::DemoCleanup(const TSharedPtr<FJsonObject>& Params)
 {
+	// Anchor the editor to the saved home level FIRST. Otherwise deleting
+	// the demo level under it leaves the editor on an Untitled map and
+	// every subsequent action triggers a "save Untitled?" dialog.
+	{
+		FString HomeErr;
+		EnsureHomeLevelLoaded(HomeErr);
+	}
+
 	UWorld* World = GetEditorWorld();
 
 	// 1) Destroy actors whose label starts with "Demo_"
@@ -326,6 +373,10 @@ AActor* FDemoHandlers::SpawnPointLight(const FString& Label, FVector Location,
 	UPointLightComponent* Comp = Light->PointLightComponent;
 	if (Comp)
 	{
+		// Movable mobility — purely dynamic light, no lightmap bake required.
+		// Without this UE flags every spawned light as "lighting needs to be
+		// rebuilt" because Static is the default and the demo never bakes.
+		Comp->SetMobility(EComponentMobility::Movable);
 		Comp->SetIntensity(Intensity);
 		Comp->SetLightColor(FLinearColor(Color));
 	}
@@ -438,13 +489,25 @@ TSharedPtr<FJsonObject> FDemoHandlers::StepCreateLevel()
 		return Result;
 	}
 
-	// Create a new map via the editor
 	UEditorAssetLibrary::MakeDirectory(DemoConstants::MAT_DIR);
-	bool bCreated = LevelSub->NewLevel(DemoConstants::DEMO_LEVEL);
+
+	// Idempotent: load the existing demo level on re-runs instead of
+	// calling NewLevel (which on an existing path lands the editor on an
+	// Untitled map and triggers a save-prompt loop).
+	bool bCreated = false;
+	if (UEditorAssetLibrary::DoesAssetExist(DemoConstants::DEMO_LEVEL))
+	{
+		LevelSub->LoadLevel(DemoConstants::DEMO_LEVEL);
+	}
+	else
+	{
+		bCreated = LevelSub->NewLevel(DemoConstants::DEMO_LEVEL);
+		if (bCreated) LevelSub->SaveCurrentLevel();
+	}
 
 	Result->SetStringField(TEXT("levelPath"), DemoConstants::DEMO_LEVEL);
 	Result->SetBoolField(TEXT("created"), bCreated);
-	Result->SetBoolField(TEXT("success"), bCreated);
+	Result->SetBoolField(TEXT("success"), true);
 	return Result;
 }
 
@@ -727,6 +790,7 @@ TSharedPtr<FJsonObject> FDemoHandlers::StepMoonlight()
 	UDirectionalLightComponent* Comp = DirLight->GetComponent();
 	if (Comp)
 	{
+		Comp->SetMobility(EComponentMobility::Movable);
 		Comp->SetIntensity(3.0f);
 		Comp->SetLightColor(FLinearColor(FColor(100, 120, 200)));
 	}
@@ -764,7 +828,9 @@ TSharedPtr<FJsonObject> FDemoHandlers::StepSkyLight()
 	USkyLightComponent* Comp = Sky->GetLightComponent();
 	if (Comp)
 	{
+		Comp->SetMobility(EComponentMobility::Movable);
 		Comp->SetIntensity(0.3f);
+		Comp->RecaptureSky();
 	}
 
 	Result->SetStringField(TEXT("actorLabel"), Sky->GetActorLabel());
@@ -1120,16 +1186,7 @@ TSharedPtr<FJsonObject> FDemoHandlers::StepLevelSequence()
 	UMovieScene* MovieScene = Seq->GetMovieScene();
 	if (MovieScene)
 	{
-		AActor* HeroSphere = nullptr;
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			if ((*It)->GetActorLabel() == TEXT("Demo_HeroSphere"))
-			{
-				HeroSphere = *It;
-				break;
-			}
-		}
-
+		AActor* HeroSphere = FindActorByLabel(World, TEXT("Demo_HeroSphere"));
 		if (HeroSphere)
 		{
 			FGuid BindingGuid = MovieScene->AddPossessable(
@@ -1168,11 +1225,57 @@ TSharedPtr<FJsonObject> FDemoHandlers::StepTuningPanel()
 {
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 
-	// This step is a placeholder - creating EditorUtilityWidgets programmatically
-	// requires careful factory setup. Mark as success with a note.
-	Result->SetStringField(TEXT("note"),
-		TEXT("Tuning panel step skipped - create EUW_DemoTuning manually in /Game/Demo/ for a custom control panel. "
-		     "Use the widget tool's create_widget action to build one interactively."));
+	const FString PackagePath = DemoConstants::MAT_DIR;        // /Game/Demo
+	const FString AssetName   = TEXT("EUW_DemoTuning");
+	const FString FullPath    = PackagePath / AssetName;
+
+	// Idempotent: if it already exists, return existed.
+	if (UEditorAssetLibrary::DoesAssetExist(FullPath))
+	{
+		Result->SetStringField(TEXT("assetPath"), FullPath);
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("status"), TEXT("existed"));
+		return Result;
+	}
+
+	UClass* EUWBClass = FindObject<UClass>(nullptr, TEXT("/Script/Blutility.EditorUtilityWidgetBlueprint"));
+	if (!EUWBClass)
+	{
+		Result->SetStringField(TEXT("error"), TEXT("EditorUtilityWidgetBlueprint class not found - Blutility plugin disabled?"));
+		Result->SetBoolField(TEXT("success"), false);
+		return Result;
+	}
+
+	UClass* FactoryClass = FindObject<UClass>(nullptr, TEXT("/Script/UMGEditor.WidgetBlueprintFactory"));
+	if (!FactoryClass)
+	{
+		Result->SetStringField(TEXT("error"), TEXT("WidgetBlueprintFactory not found"));
+		Result->SetBoolField(TEXT("success"), false);
+		return Result;
+	}
+
+	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+	UFactory* Factory = NewObject<UFactory>(GetTransientPackage(), FactoryClass);
+	// ParentClass / BlueprintType are public on UWidgetBlueprintFactory; set via reflection
+	// to avoid a hard UMGEditor dependency in this file.
+	if (FProperty* ParentProp = Factory->GetClass()->FindPropertyByName(TEXT("ParentClass")))
+	{
+		FString ParentRef = TEXT("/Script/Blutility.EditorUtilityWidget");
+		ParentProp->ImportText_Direct(*ParentRef, ParentProp->ContainerPtrToValuePtr<void>(Factory), Factory, PPF_None);
+	}
+
+	UObject* NewAsset = AssetTools.CreateAsset(AssetName, PackagePath, EUWBClass, Factory);
+	if (!NewAsset)
+	{
+		Result->SetStringField(TEXT("error"), TEXT("CreateAsset returned null for EUW_DemoTuning"));
+		Result->SetBoolField(TEXT("success"), false);
+		return Result;
+	}
+
+	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+
+	Result->SetStringField(TEXT("assetPath"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("status"), TEXT("created"));
 	Result->SetBoolField(TEXT("success"), true);
 	return Result;
 }

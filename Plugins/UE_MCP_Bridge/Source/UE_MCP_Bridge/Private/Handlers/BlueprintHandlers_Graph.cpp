@@ -10,6 +10,7 @@
 #include "HandlerJsonProperty.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet2/CompilerResultsLog.h"
 #include "BlueprintEditorLibrary.h"
 #include "Engine/Blueprint.h"
 #include "EdGraph/EdGraph.h"
@@ -28,6 +29,7 @@
 #include "K2Node_DynamicCast.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_CallDelegate.h"
+#include "K2Node_ConstructObjectFromClass.h"
 #include "UObject/UnrealType.h"
 #include "UObject/Package.h"
 #include "UObject/TopLevelAssetPath.h"
@@ -86,6 +88,21 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 	else if (NodeClass == TEXT("SetVar"))   ResolvedClass = TEXT("K2Node_VariableSet");
 	else if (NodeClass == TEXT("Branch"))   ResolvedClass = TEXT("K2Node_IfThenElse");
 	else if (NodeClass == TEXT("CustomEvent")) ResolvedClass = TEXT("K2Node_CustomEvent");
+	// #427: extra well-known node aliases. The literal K2Node_* names still
+	// work, but these short forms match what the agent reaches for first.
+	else if (NodeClass == TEXT("Cast") || NodeClass == TEXT("DynamicCast")) ResolvedClass = TEXT("K2Node_DynamicCast");
+	else if (NodeClass == TEXT("Sequence"))     ResolvedClass = TEXT("K2Node_ExecutionSequence");
+	else if (NodeClass == TEXT("ForEachLoop") || NodeClass == TEXT("ForEach")) ResolvedClass = TEXT("K2Node_CallFunction"); // resolved later via Array_ForEach
+	else if (NodeClass == TEXT("Select"))       ResolvedClass = TEXT("K2Node_Select");
+	else if (NodeClass == TEXT("Switch") || NodeClass == TEXT("SwitchInt")) ResolvedClass = TEXT("K2Node_SwitchInteger");
+	else if (NodeClass == TEXT("SwitchEnum"))   ResolvedClass = TEXT("K2Node_SwitchEnum");
+	else if (NodeClass == TEXT("SwitchString")) ResolvedClass = TEXT("K2Node_SwitchString");
+	else if (NodeClass == TEXT("MakeStruct"))   ResolvedClass = TEXT("K2Node_MakeStruct");
+	else if (NodeClass == TEXT("BreakStruct"))  ResolvedClass = TEXT("K2Node_BreakStruct");
+	else if (NodeClass == TEXT("MakeArray"))    ResolvedClass = TEXT("K2Node_MakeArray");
+	else if (NodeClass == TEXT("Return") || NodeClass == TEXT("FunctionResult")) ResolvedClass = TEXT("K2Node_FunctionResult");
+	else if (NodeClass == TEXT("ComponentBoundEvent")) ResolvedClass = TEXT("K2Node_ComponentBoundEvent");
+	else if (NodeClass == TEXT("InputAction") || NodeClass == TEXT("EnhancedInputAction")) ResolvedClass = TEXT("K2Node_EnhancedInputAction");
 
 	// Find the UEdGraphNode subclass by name (works for K2, AnimGraph, and any other graph node types)
 	UClass* NodeUClass = nullptr;
@@ -412,7 +429,13 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 		}
 	}
 
-	// Common initialization (works for all UEdGraphNode subclasses -- K2, AnimGraph, etc.)
+	// #201/#231: K2Node_ConstructObjectFromClass-derived nodes (SpawnActorFromClass,
+	// ConstructObject, AddComponent, etc.) assert in PostPlacedNewNode if the
+	// owning graph has not been Modify()'d first - the assert lives in
+	// EdGraphNode.h around the schema lookup that PostPlacedNewNode triggers.
+	// FEdGraphSchemaAction_K2NewNode::PerformAction does this Modify; mirror it
+	// here so any K2 node derived from ConstructObjectFromClass is placeable.
+	TargetGraph->Modify();
 	TargetGraph->AddNode(NewNode, false, false);
 	NewNode->CreateNewGuid();
 	NewNode->PostPlacedNewNode();
@@ -420,9 +443,15 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 
 	// #101/#118: after AllocateDefaultPins, force ReconstructNode so typed output pin
 	// ("As ClassName") appears for DynamicCast and typed pins appear for VariableGet.
+	// Skip ReconstructNode for ConstructObjectFromClass: at this point the Class
+	// pin is unset and ReconstructNode for SpawnActor walks pin defaults that
+	// expect a non-null class, asserting before AutowireNewNode would fix it.
 	if (UK2Node* K2 = Cast<UK2Node>(NewNode))
 	{
-		K2->ReconstructNode();
+		if (!K2->IsA<UK2Node_ConstructObjectFromClass>())
+		{
+			K2->ReconstructNode();
+		}
 	}
 
 	// #152: function graphs need the structural-modification signal for the
@@ -833,6 +862,15 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetNodeProperty(const TSharedPtr<FJso
 					*DefaultValue, *FinalProp->GetName(), *FinalProp->GetCPPType()));
 			}
 			TargetNode->PostEditChange();
+			// #325: writing pin-defining properties on a K2Node (e.g. VariableReference
+			// on K2Node_VariableGet, FunctionReference on K2Node_CallFunction) leaves
+			// the node's pins frozen at the old class until ReconstructNode is called.
+			// PostEditChange alone does not rebuild pins. Run reconstruct so any
+			// subsequent connect_pins call sees the up-to-date pin types.
+			if (UK2Node* AsK2 = Cast<UK2Node>(TargetNode))
+			{
+				AsK2->ReconstructNode();
+			}
 			bSetViaProperty = true;
 		}
 	}
@@ -987,8 +1025,14 @@ UActorComponent* ResolveComponentTemplate(
 	}
 
 	// 3) CDO fallback — catches native C++ components and anything the
-	// SCS walk missed. Reads only; writes to these would need different
-	// plumbing and are not supported here.
+	// SCS walk missed. The CDO component pointer is the right write target
+	// for default-value overrides on inherited native components: mutating
+	// it lands on the Blueprint's GeneratedClass CDO, which is what spawns
+	// new instances at runtime. Names match by component instance name,
+	// instance prefix, or FObjectProperty variable name (#211: declarations
+	// like UPROPERTY() UCharacterMovementComponent* CharacterMovement; expose
+	// the property name "CharacterMovement", which is what callers reach
+	// for, not the construct-time instance name "CharMoveComp").
 	if (Blueprint->GeneratedClass)
 	{
 		if (AActor* ActorCDO = Cast<AActor>(Blueprint->GeneratedClass->GetDefaultObject(false)))
@@ -1003,9 +1047,24 @@ UActorComponent* ResolveComponentTemplate(
 					C->GetName().StartsWith(ComponentName + TEXT("_")) ||
 					C->GetFName().ToString() == ComponentName)
 				{
-					// Reads of native components are fine. Writes via this
-					// path are unsupported — caller should check the flag.
 					return C;
+				}
+			}
+			// FObjectProperty lookup: walk class properties for an
+			// FObjectProperty named ComponentName whose value points at a
+			// component on the CDO.
+			if (FObjectProperty* OP = CastField<FObjectProperty>(ActorCDO->GetClass()->FindPropertyByName(FName(*ComponentName))))
+			{
+				if (OP->PropertyClass && OP->PropertyClass->IsChildOf(UActorComponent::StaticClass()))
+				{
+					if (UObject* Obj = OP->GetObjectPropertyValue_InContainer(ActorCDO))
+					{
+						if (UActorComponent* AC = Cast<UActorComponent>(Obj))
+						{
+							OutAvailable.AddUnique(ComponentName);
+							return AC;
+						}
+					}
 				}
 			}
 		}
@@ -1275,7 +1334,361 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ImportNodesT3D(const TSharedPtr<FJson
 }
 
 // ---------------------------------------------------------------------------
-// set_cdo_property -- Set a property on any C++ class CDO (not Blueprint CDO)
-// Params: className (required), propertyName (required), value (required)
-// Issues #182/#183
+// v1.0.0-rc.15 — agent-friendly BP authoring (#284 #285 #267 #277)
 // ---------------------------------------------------------------------------
+
+// #284 — compile_blueprints: batch compile + save with per-path status.
+TSharedPtr<FJsonValue> FBlueprintHandlers::CompileBlueprints(const TSharedPtr<FJsonObject>& Params)
+{
+	const TArray<TSharedPtr<FJsonValue>>* PathsArray = nullptr;
+	if (!Params->TryGetArrayField(TEXT("assetPaths"), PathsArray) || !PathsArray)
+	{
+		return MCPError(TEXT("Missing 'assetPaths' (array of blueprint asset paths)"));
+	}
+
+	bool bSave = OptionalBool(Params, TEXT("save"), true);
+
+	TArray<TSharedPtr<FJsonValue>> Results;
+	int32 Compiled = 0, Failed = 0, NotFound = 0;
+	for (const TSharedPtr<FJsonValue>& Entry : *PathsArray)
+	{
+		FString AssetPath = Entry->AsString();
+		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+		Item->SetStringField(TEXT("path"), AssetPath);
+
+		UBlueprint* Blueprint = LoadBlueprint(AssetPath);
+		if (!Blueprint)
+		{
+			Item->SetStringField(TEXT("status"), TEXT("not_found"));
+			NotFound++;
+			Results.Add(MakeShared<FJsonValueObject>(Item));
+			continue;
+		}
+
+		FCompilerResultsLog CompileLog;
+		FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::None, &CompileLog);
+
+		if (CompileLog.NumErrors > 0)
+		{
+			Item->SetStringField(TEXT("status"), TEXT("failed"));
+			Item->SetNumberField(TEXT("errors"), CompileLog.NumErrors);
+			Item->SetNumberField(TEXT("warnings"), CompileLog.NumWarnings);
+			Failed++;
+		}
+		else
+		{
+			if (bSave) SaveAssetPackage(Blueprint);
+			Item->SetStringField(TEXT("status"), TEXT("compiled"));
+			Item->SetNumberField(TEXT("warnings"), CompileLog.NumWarnings);
+			Compiled++;
+		}
+		Results.Add(MakeShared<FJsonValueObject>(Item));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetNumberField(TEXT("total"), PathsArray->Num());
+	Result->SetNumberField(TEXT("compiled"), Compiled);
+	Result->SetNumberField(TEXT("failed"), Failed);
+	Result->SetNumberField(TEXT("notFound"), NotFound);
+	Result->SetArrayField(TEXT("results"), Results);
+	return MCPResult(Result);
+}
+
+// #285 — cleanup_graph: remove orphan nodes (no pins, missing class, blank
+// title). Iterates one graph if graphName given, else every graph on the BP.
+TSharedPtr<FJsonValue> FBlueprintHandlers::CleanupGraph(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+
+	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
+	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+
+	const FString GraphName = OptionalString(Params, TEXT("graphName"));
+
+	TArray<UEdGraph*> Graphs;
+	if (!GraphName.IsEmpty())
+	{
+		if (UEdGraph* G = FindGraph(Blueprint, GraphName)) Graphs.Add(G);
+		else return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+	}
+	else
+	{
+		Blueprint->GetAllGraphs(Graphs);
+	}
+
+	int32 Removed = 0;
+	TArray<TSharedPtr<FJsonValue>> RemovedIds;
+	for (UEdGraph* Graph : Graphs)
+	{
+		if (!Graph) continue;
+		// Iterate a copy because RemoveNode mutates Graph->Nodes.
+		TArray<UEdGraphNode*> Snapshot = Graph->Nodes;
+		for (UEdGraphNode* Node : Snapshot)
+		{
+			if (!Node) continue;
+			bool bOrphan = false;
+			// Missing class (often the symptom of a node that lost its parent UClass)
+			if (!Node->GetClass()) bOrphan = true;
+			// Empty title + no pins is the canonical "corrupted node" signature.
+			else if (Node->Pins.Num() == 0 && Node->GetNodeTitle(ENodeTitleType::ListView).IsEmpty()) bOrphan = true;
+			// Function-call nodes whose target UFunction has been deleted.
+			else if (UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node))
+			{
+				if (!CallNode->GetTargetFunction()) bOrphan = true;
+			}
+
+			if (bOrphan)
+			{
+				TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+				Entry->SetStringField(TEXT("graph"), Graph->GetName());
+				Entry->SetStringField(TEXT("nodeGuid"), Node->NodeGuid.ToString());
+				Entry->SetStringField(TEXT("class"), Node->GetClass() ? Node->GetClass()->GetName() : TEXT("<null>"));
+				RemovedIds.Add(MakeShared<FJsonValueObject>(Entry));
+				Graph->RemoveNode(Node);
+				Removed++;
+			}
+		}
+	}
+
+	if (Removed > 0)
+	{
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+		SaveAssetPackage(Blueprint);
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("path"), AssetPath);
+	Result->SetNumberField(TEXT("removed"), Removed);
+	Result->SetArrayField(TEXT("removedNodes"), RemovedIds);
+	return MCPResult(Result);
+}
+
+// #267 — connect_pins_batch: apply many wirings in one call, single compile.
+TSharedPtr<FJsonValue> FBlueprintHandlers::ConnectPinsBatch(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+	const FString GraphName = OptionalString(Params, TEXT("graphName"), TEXT("EventGraph"));
+
+	const TArray<TSharedPtr<FJsonValue>>* ConnectionsArray = nullptr;
+	if (!Params->TryGetArrayField(TEXT("connections"), ConnectionsArray) || !ConnectionsArray)
+	{
+		return MCPError(TEXT("Missing 'connections' array — each entry: {sourceNode, sourcePin, targetNode, targetPin}"));
+	}
+
+	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
+	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+
+	UEdGraph* TargetGraph = FindGraph(Blueprint, GraphName);
+	if (!TargetGraph) return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+	const UEdGraphSchema* Schema = TargetGraph->GetSchema();
+	if (!Schema) return MCPError(TEXT("Graph has no schema"));
+
+	auto FindPin = [](UEdGraphNode* N, const FString& Name) -> UEdGraphPin*
+	{
+		for (UEdGraphPin* P : N->Pins)
+		{
+			if (P && P->PinName.ToString() == Name) return P;
+		}
+		return nullptr;
+	};
+
+	int32 Connected = 0, Existed = 0, Failed = 0;
+	TArray<TSharedPtr<FJsonValue>> Detail;
+	for (const TSharedPtr<FJsonValue>& Entry : *ConnectionsArray)
+	{
+		const TSharedPtr<FJsonObject> Obj = Entry->AsObject();
+		if (!Obj.IsValid()) { Failed++; continue; }
+
+		FString SrcId, SrcPin, TgtId, TgtPin;
+		Obj->TryGetStringField(TEXT("sourceNode"), SrcId);
+		Obj->TryGetStringField(TEXT("sourcePin"), SrcPin);
+		Obj->TryGetStringField(TEXT("targetNode"), TgtId);
+		Obj->TryGetStringField(TEXT("targetPin"), TgtPin);
+
+		TSharedPtr<FJsonObject> EntryResult = MakeShared<FJsonObject>();
+		EntryResult->SetStringField(TEXT("sourceNode"), SrcId);
+		EntryResult->SetStringField(TEXT("sourcePin"), SrcPin);
+		EntryResult->SetStringField(TEXT("targetNode"), TgtId);
+		EntryResult->SetStringField(TEXT("targetPin"), TgtPin);
+
+		UEdGraphNode* Src = FindNodeByGuidOrName(TargetGraph, SrcId);
+		UEdGraphNode* Tgt = FindNodeByGuidOrName(TargetGraph, TgtId);
+		if (!Src || !Tgt)
+		{
+			EntryResult->SetStringField(TEXT("status"), TEXT("node_not_found"));
+			Detail.Add(MakeShared<FJsonValueObject>(EntryResult));
+			Failed++;
+			continue;
+		}
+		UEdGraphPin* SP = FindPin(Src, SrcPin);
+		UEdGraphPin* TP = FindPin(Tgt, TgtPin);
+		if (!SP || !TP)
+		{
+			EntryResult->SetStringField(TEXT("status"), TEXT("pin_not_found"));
+			Detail.Add(MakeShared<FJsonValueObject>(EntryResult));
+			Failed++;
+			continue;
+		}
+		if (SP->LinkedTo.Contains(TP))
+		{
+			EntryResult->SetStringField(TEXT("status"), TEXT("existed"));
+			Detail.Add(MakeShared<FJsonValueObject>(EntryResult));
+			Existed++;
+			continue;
+		}
+		if (Schema->TryCreateConnection(SP, TP))
+		{
+			EntryResult->SetStringField(TEXT("status"), TEXT("connected"));
+			Connected++;
+		}
+		else
+		{
+			FPinConnectionResponse Resp = Schema->CanCreateConnection(SP, TP);
+			EntryResult->SetStringField(TEXT("status"), TEXT("failed"));
+			EntryResult->SetStringField(TEXT("reason"), Resp.Message.ToString());
+			Failed++;
+		}
+		Detail.Add(MakeShared<FJsonValueObject>(EntryResult));
+	}
+
+	if (Connected > 0)
+	{
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+		SaveAssetPackage(Blueprint);
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("path"), AssetPath);
+	Result->SetStringField(TEXT("graphName"), GraphName);
+	Result->SetNumberField(TEXT("total"), ConnectionsArray->Num());
+	Result->SetNumberField(TEXT("connected"), Connected);
+	Result->SetNumberField(TEXT("existed"), Existed);
+	Result->SetNumberField(TEXT("failed"), Failed);
+	Result->SetArrayField(TEXT("results"), Detail);
+	return MCPResult(Result);
+}
+
+// #277 — set_node_position: write NodePosX/NodePosY on a target node.
+TSharedPtr<FJsonValue> FBlueprintHandlers::SetNodePosition(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+	const FString GraphName = OptionalString(Params, TEXT("graphName"), TEXT("EventGraph"));
+	FString NodeId;
+	if (auto Err = RequireStringAlt(Params, TEXT("nodeId"), TEXT("nodeName"), NodeId)) return Err;
+
+	int32 PosX = OptionalInt(Params, TEXT("posX"), 0);
+	int32 PosY = OptionalInt(Params, TEXT("posY"), 0);
+
+	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
+	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	UEdGraph* Graph = FindGraph(Blueprint, GraphName);
+	if (!Graph) return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+	UEdGraphNode* Node = FindNodeByGuidOrName(Graph, NodeId);
+	if (!Node) return MCPError(FString::Printf(TEXT("Node not found: %s"), *NodeId));
+
+	Node->NodePosX = PosX;
+	Node->NodePosY = PosY;
+	Node->Modify();
+	Graph->NotifyGraphChanged();
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("path"), AssetPath);
+	Result->SetStringField(TEXT("graphName"), GraphName);
+	Result->SetStringField(TEXT("nodeId"), NodeId);
+	Result->SetNumberField(TEXT("posX"), PosX);
+	Result->SetNumberField(TEXT("posY"), PosY);
+	return MCPResult(Result);
+}
+
+// #277 — auto_layout_graph: simple topological layered layout. Each node is
+// placed in a column derived from longest predecessor path; rows are stacked
+// with a fixed gap. Not Sugiyama-perfect but eliminates the (0,0) stack that
+// programmatic add_node leaves behind.
+TSharedPtr<FJsonValue> FBlueprintHandlers::AutoLayoutGraph(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+	const FString GraphName = OptionalString(Params, TEXT("graphName"), TEXT("EventGraph"));
+	int32 ColumnGap = OptionalInt(Params, TEXT("columnGap"), 360);
+	int32 RowGap = OptionalInt(Params, TEXT("rowGap"), 200);
+
+	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
+	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	UEdGraph* Graph = FindGraph(Blueprint, GraphName);
+	if (!Graph) return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+
+	// Compute a column index per node: longest predecessor chain through exec
+	// pins (or any input pin if exec is absent).
+	TMap<UEdGraphNode*, int32> Column;
+	TArray<UEdGraphNode*> Order = Graph->Nodes;
+
+	auto GetIncoming = [](UEdGraphNode* Node) -> TArray<UEdGraphNode*>
+	{
+		TArray<UEdGraphNode*> Result;
+		for (UEdGraphPin* P : Node->Pins)
+		{
+			if (!P || P->Direction != EGPD_Input) continue;
+			for (UEdGraphPin* Linked : P->LinkedTo)
+			{
+				if (Linked && Linked->GetOwningNode()) Result.AddUnique(Linked->GetOwningNode());
+			}
+		}
+		return Result;
+	};
+
+	// Iterate to fixed point — simple but adequate for the typical 5-50 node
+	// graphs the bridge produces.
+	for (int32 Iter = 0; Iter < Order.Num() + 1; Iter++)
+	{
+		bool bChanged = false;
+		for (UEdGraphNode* Node : Order)
+		{
+			int32 Col = 0;
+			for (UEdGraphNode* Inc : GetIncoming(Node))
+			{
+				if (int32* InCol = Column.Find(Inc)) Col = FMath::Max(Col, *InCol + 1);
+			}
+			int32* Existing = Column.Find(Node);
+			if (!Existing || *Existing != Col)
+			{
+				Column.Add(Node, Col);
+				bChanged = true;
+			}
+		}
+		if (!bChanged) break;
+	}
+
+	// Bucket nodes per column, then assign rows in stable order.
+	TMap<int32, TArray<UEdGraphNode*>> Buckets;
+	for (UEdGraphNode* Node : Order)
+	{
+		int32 Col = Column.FindRef(Node);
+		Buckets.FindOrAdd(Col).Add(Node);
+	}
+
+	int32 Repositioned = 0;
+	for (auto& Pair : Buckets)
+	{
+		int32 Col = Pair.Key;
+		int32 Row = 0;
+		for (UEdGraphNode* Node : Pair.Value)
+		{
+			Node->NodePosX = Col * ColumnGap;
+			Node->NodePosY = Row * RowGap;
+			Node->Modify();
+			Repositioned++;
+			Row++;
+		}
+	}
+	Graph->NotifyGraphChanged();
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("path"), AssetPath);
+	Result->SetStringField(TEXT("graphName"), GraphName);
+	Result->SetNumberField(TEXT("repositioned"), Repositioned);
+	Result->SetNumberField(TEXT("columns"), Buckets.Num());
+	return MCPResult(Result);
+}

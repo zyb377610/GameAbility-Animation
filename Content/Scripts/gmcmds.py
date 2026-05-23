@@ -92,12 +92,12 @@ def timertest():
     print('timer begin.')
 
 
-# ==================== Step 1.2: 火球技能测试命令 ====================
+# ==================== Step 1.3: 火球技能测试命令（含冷却与消耗） ====================
 
 def fireball():
-    """测试火球技能：赋予 GA_Fireball 给当前控制的 Pawn 并激活"""
+    """测试火球技能：赋予 GA_Fireball → CommitAbility（检查冷却/消耗） → 发射弹道"""
     import ue
-    from gas.setup_character import init_gas_for_actor
+    from gas.setup_character import init_gas_for_actor, AttrSet_Base
     from gas.abilities.ga_fireball import GA_Fireball
 
     w = ue.GetGameWorld()
@@ -115,19 +115,62 @@ def fireball():
     if not asc:
         return
 
+    # 显示当前状态
+    attr_set = asc.GetAttributeSet(AttrSet_Base.Class())
+    if attr_set:
+        print(f"[fireball] 当前 Mana={attr_set.Mana}/{attr_set.MaxMana}")
+
     ga_class = GA_Fireball.Class()
     if not ga_class:
         print("[fireball] 错误: GA_Fireball UClass 未找到")
         return
 
     asc.GiveAbility(ga_class, 1)
-    asc.TryActivateAbilityByClass(ga_class)
 
-    # NePy 不支持 K2_ActivateAbility 重载，手动调用
+    # Step 1.3: 用 try_commit_and_fire 替代直接 do_fireball
+    # CommitAbility() 内部检查冷却/消耗，成功则应用 Cost GE + Cooldown GE
     for spec in asc.ActivatableAbilities.Items:
-        if spec.Ability and hasattr(spec.Ability, 'do_fireball'):
-            spec.Ability.do_fireball(asc, pawn)
+        if spec.Ability and hasattr(spec.Ability, 'try_commit_and_fire'):
+            spec.Ability.try_commit_and_fire(asc, pawn)
             break
+    else:
+        print("[fireball] 错误: 找不到 GA_Fireball 实例")
+
+
+def fireball_status():
+    """查看火球技能冷却和消耗状态"""
+    import ue
+    from gas.setup_character import init_gas_for_actor, AttrSet_Base
+
+    w = ue.GetGameWorld()
+    if not w:
+        print("[fireball_status] 错误: 当前没有 World，请先 PIE")
+        return
+
+    ctrl = ue.GameplayStatics.GetPlayerController(w, 0)
+    if not ctrl or not ctrl.Pawn:
+        print("[fireball_status] 错误: 获取不到 Pawn")
+        return
+
+    pawn = ctrl.Pawn
+    asc = init_gas_for_actor(pawn)
+    if not asc:
+        return
+
+    attr_set = asc.GetAttributeSet(AttrSet_Base.Class())
+    if attr_set:
+        print(f"[fireball_status] Mana={attr_set.Mana}/{attr_set.MaxMana}, "
+              f"Health={attr_set.Health}/{attr_set.MaxHealth}, "
+              f"AttackPower={attr_set.AttackPower}")
+
+    # 检查冷却 Tag
+    cooldown_tag = ue.GameplayTag()
+    cooldown_tag.TagName = "Cooldown.Fireball"
+    tag_count = asc.GetGameplayTagCount(cooldown_tag)
+    if tag_count > 0:
+        print(f"[fireball_status] 冷却中! Tag 'Cooldown.Fireball' 计数={tag_count}")
+    else:
+        print("[fireball_status] 未在冷却，技能可用")
 
 
 def gas_init():

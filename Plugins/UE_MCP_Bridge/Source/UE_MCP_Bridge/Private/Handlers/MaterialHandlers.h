@@ -15,6 +15,7 @@ private:
 	static TSharedPtr<FJsonValue> ReadMaterial(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetMaterialShadingModel(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetMaterialBlendMode(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetMaterialDomain(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetMaterialBaseColor(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddMaterialExpression(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListMaterialExpressions(const TSharedPtr<FJsonObject>& Params);
@@ -22,12 +23,7 @@ private:
 	static TSharedPtr<FJsonValue> RecompileMaterial(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateMaterialInstance(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetMaterialParameter(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> ConnectExpression(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> ConnectMaterialProperty(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> DeleteExpression(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetExpressionValue(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> CreateMaterialFromTexture(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> ReadMaterialInstance(const TSharedPtr<FJsonObject>& Params);
 
 	// Name-based handlers matching TS tool expectations
 	static TSharedPtr<FJsonValue> ConnectTextureToMaterial(const TSharedPtr<FJsonObject>& Params);
@@ -70,4 +66,8 @@ private:
 	static TSharedPtr<FJsonValue> RenderMaterialPreview(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BeginMaterialTransaction(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> EndMaterialTransaction(const TSharedPtr<FJsonObject>& Params);
+
+	// #225: single-call simple material authoring + EMaterialUsage flag
+	static TSharedPtr<FJsonValue> CreateMaterialSimple(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetMaterialUsage(const TSharedPtr<FJsonObject>& Params);
 };

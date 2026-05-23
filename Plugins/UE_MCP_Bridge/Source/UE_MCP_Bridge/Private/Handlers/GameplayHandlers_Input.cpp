@@ -6,6 +6,7 @@
 #include "GameplayHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerAssetCreate.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 #include "UObject/UObjectGlobals.h"
@@ -49,25 +50,15 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateInputAction(const TSharedPtr<FJs
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Input"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("InputAction")))
-	{
-		return Existing;
-	}
-
 	UClass* InputActionClass = FindObject<UClass>(nullptr, TEXT("/Script/EnhancedInput.InputAction"));
 	if (!InputActionClass)
 	{
 		return MCPError(TEXT("InputAction class not found. Enable EnhancedInput plugin."));
 	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, InputActionClass, nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create InputAction"));
-	}
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("InputAction"), InputActionClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UObject* NewAsset = Created.Asset;
 
 	// Apply valueType if provided
 	FString ValueTypeStr = OptionalString(Params, TEXT("valueType"));
@@ -127,111 +118,22 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateInputMappingContext(const TShare
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Input"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("InputMappingContext")))
-	{
-		return Existing;
-	}
-
 	UClass* IMCClass = FindObject<UClass>(nullptr, TEXT("/Script/EnhancedInput.InputMappingContext"));
 	if (!IMCClass)
 	{
 		return MCPError(TEXT("InputMappingContext class not found. Enable EnhancedInput plugin."));
 	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("InputMappingContext"), IMCClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, IMCClass, nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create InputMappingContext"));
-	}
-
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
-
-	return MCPResult(Result);
-}
-
-
-TSharedPtr<FJsonValue> FGameplayHandlers::SetupEnhancedInput(const TSharedPtr<FJsonObject>& Params)
-{
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-
-	FString MappingContextPath;
-	if (auto Err = RequireString(Params, TEXT("mappingContextPath"), MappingContextPath)) return Err;
-
-	int32 Priority = OptionalInt(Params, TEXT("priority"), 0);
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Find actor by label
-	AActor* FoundActor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			FoundActor = *ActorIt;
-			break;
-		}
-	}
-
-	if (!FoundActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
-
-	// Load the mapping context asset
-	UInputMappingContext* MappingContext = LoadObject<UInputMappingContext>(nullptr, *MappingContextPath);
-	if (!MappingContext)
-	{
-		return MCPError(FString::Printf(TEXT("InputMappingContext not found: %s"), *MappingContextPath));
-	}
-
-	// Check if the actor has an EnhancedInputComponent
-	UEnhancedInputComponent* InputComp = FoundActor->FindComponentByClass<UEnhancedInputComponent>();
-	if (!InputComp)
-	{
-		return MCPError(TEXT("Actor does not have an EnhancedInputComponent"));
-	}
-
-	// Optionally bind input actions from params
-	TArray<TSharedPtr<FJsonValue>> BoundActions;
-	const TArray<TSharedPtr<FJsonValue>>* ActionsArray = nullptr;
-	if (Params->TryGetArrayField(TEXT("actions"), ActionsArray))
-	{
-		for (const auto& ActionVal : *ActionsArray)
-		{
-			const TSharedPtr<FJsonObject>* ActionObj = nullptr;
-			if (ActionVal->TryGetObject(ActionObj))
-			{
-				FString ActionPath;
-				if ((*ActionObj)->TryGetStringField(TEXT("actionPath"), ActionPath))
-				{
-					UInputAction* InputAction = LoadObject<UInputAction>(nullptr, *ActionPath);
-					if (InputAction)
-					{
-						TSharedPtr<FJsonObject> BoundAction = MakeShared<FJsonObject>();
-						BoundAction->SetStringField(TEXT("actionPath"), ActionPath);
-						BoundAction->SetStringField(TEXT("actionName"), InputAction->GetName());
-						BoundActions.Add(MakeShared<FJsonValueObject>(BoundAction));
-					}
-				}
-			}
-		}
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
-	Result->SetStringField(TEXT("mappingContext"), MappingContext->GetName());
-	Result->SetNumberField(TEXT("priority"), Priority);
-	Result->SetArrayField(TEXT("boundActions"), BoundActions);
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 
 	return MCPResult(Result);
 }
@@ -829,17 +731,7 @@ TSharedPtr<FJsonValue> FGameplayHandlers::InspectPie(const TSharedPtr<FJsonObjec
 		return MCPResult(Result);
 	}
 
-	// Find specific actor by label
-	AActor* FoundActor = nullptr;
-	for (TActorIterator<AActor> It(PIEWorld); It; ++It)
-	{
-		if ((*It)->GetActorLabel() == ActorLabel || (*It)->GetName() == ActorLabel)
-		{
-			FoundActor = *It;
-			break;
-		}
-	}
-
+	AActor* FoundActor = FindActorByLabelOrName(PIEWorld, ActorLabel);
 	if (!FoundActor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found in PIE: %s"), *ActorLabel));
@@ -921,17 +813,7 @@ TSharedPtr<FJsonValue> FGameplayHandlers::GetPieAnimState(const TSharedPtr<FJson
 
 	UWorld* PIEWorld = PIEContext->World();
 
-	// Find actor
-	AActor* FoundActor = nullptr;
-	for (TActorIterator<AActor> It(PIEWorld); It; ++It)
-	{
-		if ((*It)->GetActorLabel() == ActorLabel || (*It)->GetName() == ActorLabel)
-		{
-			FoundActor = *It;
-			break;
-		}
-	}
-
+	AActor* FoundActor = FindActorByLabelOrName(PIEWorld, ActorLabel);
 	if (!FoundActor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found in PIE: %s"), *ActorLabel));
@@ -1025,15 +907,7 @@ TSharedPtr<FJsonValue> FGameplayHandlers::GetPieAnimProperties(const TSharedPtr<
 		return MCPError(TEXT("No PIE world available. Is Play-In-Editor running?"));
 	}
 
-	AActor* FoundActor = nullptr;
-	for (TActorIterator<AActor> It(PIEWorld); It; ++It)
-	{
-		if ((*It)->GetActorLabel() == ActorLabel || (*It)->GetName() == ActorLabel)
-		{
-			FoundActor = *It;
-			break;
-		}
-	}
+	AActor* FoundActor = FindActorByLabelOrName(PIEWorld, ActorLabel);
 	if (!FoundActor) return MCPError(FString::Printf(TEXT("Actor not found in PIE: %s"), *ActorLabel));
 
 	USkeletalMeshComponent* SkelMesh = FoundActor->FindComponentByClass<USkeletalMeshComponent>();
@@ -1236,17 +1110,7 @@ TSharedPtr<FJsonValue> FGameplayHandlers::ApplyDamageInPie(const TSharedPtr<FJso
 	}
 	UWorld* PIEWorld = PIEContext->World();
 
-	// Find actor by label or name
-	AActor* TargetActor = nullptr;
-	for (TActorIterator<AActor> It(PIEWorld); It; ++It)
-	{
-		if ((*It)->GetActorLabel() == ActorLabel || (*It)->GetName() == ActorLabel)
-		{
-			TargetActor = *It;
-			break;
-		}
-	}
-
+	AActor* TargetActor = FindActorByLabelOrName(PIEWorld, ActorLabel);
 	if (!TargetActor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found in PIE: %s"), *ActorLabel));

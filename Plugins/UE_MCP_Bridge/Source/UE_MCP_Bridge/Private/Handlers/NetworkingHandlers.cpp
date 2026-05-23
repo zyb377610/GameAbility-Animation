@@ -23,11 +23,6 @@ void FNetworkingHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_always_relevant"), &SetAlwaysRelevant);
 	Registry.RegisterHandler(TEXT("set_net_priority"), &SetNetPriority);
 	Registry.RegisterHandler(TEXT("set_replicate_movement"), &SetReplicateMovement);
-	Registry.RegisterHandler(TEXT("set_variable_replication"), &SetVariableReplication);
-	Registry.RegisterHandler(TEXT("get_replication_info"), &GetReplicationInfo);
-	Registry.RegisterHandler(TEXT("set_owner_only_relevant"), &SetOwnerOnlyRelevant);
-
-	// Aliases
 	Registry.RegisterHandler(TEXT("set_property_replicated"), &SetVariableReplication);
 	Registry.RegisterHandler(TEXT("set_only_relevant_to_owner"), &SetOwnerOnlyRelevant);
 	// New handlers
@@ -37,22 +32,24 @@ void FNetworkingHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 
 AActor* FNetworkingHandlers::LoadBlueprintCDO(const FString& BlueprintPath, TSharedPtr<FJsonObject>& OutResult)
 {
-	UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
-	if (!Blueprint || !Blueprint->GeneratedClass)
-	{
-		OutResult->SetStringField(TEXT("error"), FString::Printf(TEXT("Blueprint not found or has no generated class: %s"), *BlueprintPath));
-		OutResult->SetBoolField(TEXT("success"), false);
-		return nullptr;
-	}
-
-	AActor* CDO = Cast<AActor>(Blueprint->GeneratedClass->GetDefaultObject());
+	// Thin adapter over the shared ::LoadBlueprintCDO<T> helper in HandlerUtils.h.
+	// Translates the helper's TSharedPtr<FJsonValue> error into the OutResult-style
+	// {success:false, error:...} object the networking call sites accumulate into.
+	TSharedPtr<FJsonValue> Err;
+	AActor* CDO = ::LoadBlueprintCDO<AActor>(BlueprintPath, Err);
 	if (!CDO)
 	{
-		OutResult->SetStringField(TEXT("error"), TEXT("CDO is not an Actor"));
+		FString ErrMsg = TEXT("Failed to load blueprint CDO");
+		if (Err.IsValid())
+		{
+			if (TSharedPtr<FJsonObject> ErrObj = Err->AsObject())
+			{
+				ErrObj->TryGetStringField(TEXT("error"), ErrMsg);
+			}
+		}
+		OutResult->SetStringField(TEXT("error"), ErrMsg);
 		OutResult->SetBoolField(TEXT("success"), false);
-		return nullptr;
 	}
-
 	return CDO;
 }
 
@@ -74,8 +71,13 @@ TSharedPtr<FJsonValue> FNetworkingHandlers::GetNetworkingInfo(const TSharedPtr<F
 
 	Result->SetStringField(TEXT("blueprintPath"), BlueprintPath);
 	Result->SetBoolField(TEXT("replicates"), CDO->GetIsReplicated());
+#if UE_MCP_HAS_5_5_API
 	Result->SetNumberField(TEXT("netUpdateFrequency"), CDO->GetNetUpdateFrequency());
 	Result->SetNumberField(TEXT("minNetUpdateFrequency"), CDO->GetMinNetUpdateFrequency());
+#else
+	Result->SetNumberField(TEXT("netUpdateFrequency"), CDO->NetUpdateFrequency);
+	Result->SetNumberField(TEXT("minNetUpdateFrequency"), CDO->MinNetUpdateFrequency);
+#endif
 	Result->SetNumberField(TEXT("netPriority"), CDO->NetPriority);
 	Result->SetBoolField(TEXT("alwaysRelevant"), CDO->bAlwaysRelevant);
 	Result->SetBoolField(TEXT("replicateMovement"), CDO->IsReplicatingMovement());
@@ -132,20 +134,33 @@ TSharedPtr<FJsonValue> FNetworkingHandlers::ConfigureNetUpdateFrequency(const TS
 	double NetUpdateFrequency = 0;
 	if (Params->TryGetNumberField(TEXT("netUpdateFrequency"), NetUpdateFrequency))
 	{
+#if UE_MCP_HAS_5_5_API
 		CDO->SetNetUpdateFrequency((float)NetUpdateFrequency);
+#else
+		CDO->NetUpdateFrequency = (float)NetUpdateFrequency;
+#endif
 	}
 	double MinNetUpdateFrequency = 0;
 	if (Params->TryGetNumberField(TEXT("minNetUpdateFrequency"), MinNetUpdateFrequency))
 	{
+#if UE_MCP_HAS_5_5_API
 		CDO->SetMinNetUpdateFrequency((float)MinNetUpdateFrequency);
+#else
+		CDO->MinNetUpdateFrequency = (float)MinNetUpdateFrequency;
+#endif
 	}
 
 	UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
 	SaveBlueprint(Blueprint);
 
 	Result->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+#if UE_MCP_HAS_5_5_API
 	Result->SetNumberField(TEXT("netUpdateFrequency"), CDO->GetNetUpdateFrequency());
 	Result->SetNumberField(TEXT("minNetUpdateFrequency"), CDO->GetMinNetUpdateFrequency());
+#else
+	Result->SetNumberField(TEXT("netUpdateFrequency"), CDO->NetUpdateFrequency);
+	Result->SetNumberField(TEXT("minNetUpdateFrequency"), CDO->MinNetUpdateFrequency);
+#endif
 	Result->SetBoolField(TEXT("success"), true);
 	return MCPResult(Result);
 }
@@ -392,92 +407,6 @@ TSharedPtr<FJsonValue> FNetworkingHandlers::SetVariableReplication(const TShared
 	Payload->SetStringField(TEXT("variableName"), VariableName);
 	Payload->SetStringField(TEXT("replicationType"), PrevType);
 	MCPSetRollback(Result, TEXT("set_variable_replication"), Payload);
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FNetworkingHandlers::GetReplicationInfo(const TSharedPtr<FJsonObject>& Params)
-{
-	FString BlueprintPath;
-	if (auto Err = RequireString(Params, TEXT("blueprintPath"), BlueprintPath)) return Err;
-
-	UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
-	if (!Blueprint || !Blueprint->GeneratedClass)
-	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found or has no generated class: %s"), *BlueprintPath));
-	}
-
-	AActor* CDO = Cast<AActor>(Blueprint->GeneratedClass->GetDefaultObject());
-	if (!CDO)
-	{
-		return MCPError(TEXT("CDO is not an Actor"));
-	}
-
-	// General replication info
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("blueprintPath"), BlueprintPath);
-	Result->SetBoolField(TEXT("replicates"), CDO->GetIsReplicated());
-	Result->SetBoolField(TEXT("replicateMovement"), CDO->IsReplicatingMovement());
-	Result->SetBoolField(TEXT("alwaysRelevant"), CDO->bAlwaysRelevant);
-	Result->SetBoolField(TEXT("onlyRelevantToOwner"), CDO->bOnlyRelevantToOwner);
-	Result->SetNumberField(TEXT("netUpdateFrequency"), CDO->GetNetUpdateFrequency());
-	Result->SetNumberField(TEXT("netPriority"), CDO->NetPriority);
-	Result->SetNumberField(TEXT("netDormancy"), (int32)CDO->NetDormancy);
-
-	// Iterate all properties on the CDO class looking for replicated ones (CPF_Net flag)
-	TArray<TSharedPtr<FJsonValue>> ReplicatedProps;
-	for (TFieldIterator<FProperty> PropIt(Blueprint->GeneratedClass); PropIt; ++PropIt)
-	{
-		FProperty* Property = *PropIt;
-		if (!Property) continue;
-
-		if (Property->HasAnyPropertyFlags(CPF_Net))
-		{
-			TSharedPtr<FJsonObject> PropObj = MakeShared<FJsonObject>();
-			PropObj->SetStringField(TEXT("name"), Property->GetName());
-			PropObj->SetStringField(TEXT("type"), Property->GetCPPType());
-			PropObj->SetBoolField(TEXT("isRepNotify"), Property->HasAnyPropertyFlags(CPF_RepNotify));
-
-			// Determine replication condition from the blueprint variable description
-			FString ConditionStr = TEXT("COND_None");
-			for (const FBPVariableDescription& Var : Blueprint->NewVariables)
-			{
-				if (Var.VarName == Property->GetFName())
-				{
-					switch (Var.ReplicationCondition)
-					{
-					case COND_None:             ConditionStr = TEXT("COND_None"); break;
-					case COND_InitialOnly:      ConditionStr = TEXT("COND_InitialOnly"); break;
-					case COND_OwnerOnly:         ConditionStr = TEXT("COND_OwnerOnly"); break;
-					case COND_SkipOwner:         ConditionStr = TEXT("COND_SkipOwner"); break;
-					case COND_SimulatedOnly:     ConditionStr = TEXT("COND_SimulatedOnly"); break;
-					case COND_AutonomousOnly:    ConditionStr = TEXT("COND_AutonomousOnly"); break;
-					case COND_SimulatedOrPhysics: ConditionStr = TEXT("COND_SimulatedOrPhysics"); break;
-					case COND_InitialOrOwner:    ConditionStr = TEXT("COND_InitialOrOwner"); break;
-					case COND_Custom:            ConditionStr = TEXT("COND_Custom"); break;
-					case COND_ReplayOrOwner:     ConditionStr = TEXT("COND_ReplayOrOwner"); break;
-					case COND_ReplayOnly:        ConditionStr = TEXT("COND_ReplayOnly"); break;
-					case COND_SkipReplay:        ConditionStr = TEXT("COND_SkipReplay"); break;
-					case COND_Dynamic:           ConditionStr = TEXT("COND_Dynamic"); break;
-					case COND_Never:             ConditionStr = TEXT("COND_Never"); break;
-					default:                     ConditionStr = TEXT("Unknown"); break;
-					}
-					break;
-				}
-			}
-			PropObj->SetStringField(TEXT("replicationCondition"), ConditionStr);
-
-			// Rep notify function name
-			if (Property->HasAnyPropertyFlags(CPF_RepNotify) && Property->RepNotifyFunc != NAME_None)
-			{
-				PropObj->SetStringField(TEXT("repNotifyFunc"), Property->RepNotifyFunc.ToString());
-			}
-
-			ReplicatedProps.Add(MakeShared<FJsonValueObject>(PropObj));
-		}
-	}
-
-	Result->SetArrayField(TEXT("replicatedProperties"), ReplicatedProps);
-	Result->SetNumberField(TEXT("replicatedPropertyCount"), ReplicatedProps.Num());
 	return MCPResult(Result);
 }
 

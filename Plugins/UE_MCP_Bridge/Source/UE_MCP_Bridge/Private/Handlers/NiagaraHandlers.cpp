@@ -1,6 +1,7 @@
 #include "NiagaraHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerAssetCreate.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
@@ -25,6 +26,7 @@
 #include "NiagaraNodeCustomHlsl.h"
 #include "NiagaraScriptFactoryNew.h"
 #include "NiagaraEmitterHandle.h"
+#include "NiagaraEditorUtilities.h"
 #include "Editor.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -44,7 +46,6 @@ void FNiagaraHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_niagara_emitter"), &CreateNiagaraEmitter);
 	Registry.RegisterHandler(TEXT("spawn_niagara_at_location"), &SpawnNiagaraAtLocation);
 	Registry.RegisterHandler(TEXT("set_niagara_parameter"), &SetNiagaraParameter);
-	Registry.RegisterHandler(TEXT("create_niagara_system_from_emitter"), &CreateNiagaraSystemFromEmitter);
 	Registry.RegisterHandler(TEXT("add_emitter_to_system"), &AddEmitterToSystem);
 	Registry.RegisterHandler(TEXT("set_emitter_property"), &SetEmitterProperty);
 	Registry.RegisterHandler(TEXT("get_emitter_info"), &GetEmitterInfo);
@@ -142,20 +143,6 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateNiagaraSystem(const TSharedPtr<FJ
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/VFX"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	const FString ProbePath = PackagePath + TEXT("/") + Name + TEXT(".") + Name;
-	if (UNiagaraSystem* Existing = LoadObject<UNiagaraSystem>(nullptr, *ProbePath))
-	{
-		if (OnConflict == TEXT("error"))
-		{
-			return MCPError(FString::Printf(TEXT("NiagaraSystem '%s' already exists"), *ProbePath));
-		}
-		auto Res = MCPSuccess();
-		MCPSetExisted(Res);
-		Res->SetStringField(TEXT("path"), Existing->GetPathName());
-		Res->SetStringField(TEXT("name"), Name);
-		return MCPResult(Res);
-	}
-
 	UClass* FactoryClass = FindObject<UClass>(nullptr, TEXT("/Script/NiagaraEditor.NiagaraSystemFactoryNew"));
 	UFactory* Factory = nullptr;
 	if (FactoryClass)
@@ -163,25 +150,16 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateNiagaraSystem(const TSharedPtr<FJ
 		Factory = Cast<UFactory>(NewObject<UObject>(GetTransientPackage(), FactoryClass));
 	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
+	auto Created = MCPCreateAssetIdempotent<UNiagaraSystem>(Name, PackagePath, OnConflict, TEXT("NiagaraSystem"), Factory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, UNiagaraSystem::StaticClass(), Factory);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create NiagaraSystem. Ensure the Niagara plugin is enabled."));
-	}
-
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-
-	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("assetPath"), NewAsset->GetPathName());
-	MCPSetRollback(Result, TEXT("delete_asset"), Payload);
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 
 	return MCPResult(Result);
 }
@@ -252,33 +230,22 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateNiagaraEmitter(const TSharedPtr<F
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/VFX"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("NiagaraEmitter")))
-	{
-		return Existing;
-	}
-
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
 	UClass* EmitterClass = FindObject<UClass>(nullptr, TEXT("/Script/Niagara.NiagaraEmitter"));
 	if (!EmitterClass)
 	{
 		return MCPError(TEXT("NiagaraEmitter class not found - factory not available"));
 	}
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, EmitterClass, nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create NiagaraEmitter - factory not available"));
-	}
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("NiagaraEmitter"), EmitterClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 	return MCPResult(Result);
 }
 
@@ -295,44 +262,16 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SpawnNiagaraAtLocation(const TSharedPtr
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	// Parse location — accept nested object {x,y,z} or flat x/y/z (#70)
-	FVector Location = FVector::ZeroVector;
+	// Location accepts nested {x,y,z} or flat x/y/z params (#70).
+	FVector Location = OptionalVec3(Params, TEXT("location"));
+	if (Location == FVector::ZeroVector)
 	{
-		double X = 0, Y = 0, Z = 0;
-		const TSharedPtr<FJsonObject>* LocationObj = nullptr;
-		if (Params->TryGetObjectField(TEXT("location"), LocationObj))
-		{
-			(*LocationObj)->TryGetNumberField(TEXT("x"), X);
-			(*LocationObj)->TryGetNumberField(TEXT("y"), Y);
-			(*LocationObj)->TryGetNumberField(TEXT("z"), Z);
-		}
-		else
-		{
-			Params->TryGetNumberField(TEXT("x"), X);
-			Params->TryGetNumberField(TEXT("y"), Y);
-			Params->TryGetNumberField(TEXT("z"), Z);
-		}
-		Location = FVector(X, Y, Z);
+		ReadVec3Fields(Params, Location);
 	}
-
-	// Parse rotation — accept nested object or flat
-	FRotator Rotation = FRotator::ZeroRotator;
+	FRotator Rotation = OptionalRotator(Params, TEXT("rotation"));
+	if (Rotation == FRotator::ZeroRotator)
 	{
-		double Pitch = 0, Yaw = 0, Roll = 0;
-		const TSharedPtr<FJsonObject>* RotationObj = nullptr;
-		if (Params->TryGetObjectField(TEXT("rotation"), RotationObj))
-		{
-			(*RotationObj)->TryGetNumberField(TEXT("pitch"), Pitch);
-			(*RotationObj)->TryGetNumberField(TEXT("yaw"), Yaw);
-			(*RotationObj)->TryGetNumberField(TEXT("roll"), Roll);
-		}
-		else
-		{
-			Params->TryGetNumberField(TEXT("pitch"), Pitch);
-			Params->TryGetNumberField(TEXT("yaw"), Yaw);
-			Params->TryGetNumberField(TEXT("roll"), Roll);
-		}
-		Rotation = FRotator(Pitch, Yaw, Roll);
+		ReadRotatorFields(Params, Rotation);
 	}
 
 	// Parse scale
@@ -350,19 +289,9 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SpawnNiagaraAtLocation(const TSharedPtr
 
 	// Idempotency: if a label is provided and an actor with that label already exists, short-circuit
 	FString Label = OptionalString(Params, TEXT("label"));
-	if (!Label.IsEmpty())
+	if (auto ExistingActor = MCPCheckActorLabelExists(World, Label, TEXT("skip"), TEXT("Niagara actor")))
 	{
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			if (It->GetActorLabel() == Label)
-			{
-				auto Existed = MCPSuccess();
-				MCPSetExisted(Existed);
-				Existed->SetStringField(TEXT("systemPath"), SystemPath);
-				Existed->SetStringField(TEXT("actorLabel"), Label);
-				return MCPResult(Existed);
-			}
-		}
+		return ExistingActor;
 	}
 
 	UNiagaraComponent* SpawnedComponent = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
@@ -428,18 +357,7 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetNiagaraParameter(const TSharedPtr<FJ
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	// Find actor by label
-	AActor* FoundActor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		AActor* Actor = *ActorIt;
-		if (Actor && Actor->GetActorLabel() == ActorLabel)
-		{
-			FoundActor = Actor;
-			break;
-		}
-	}
-
+	AActor* FoundActor = FindActorByLabel(World, ActorLabel);
 	if (!FoundActor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found with label: %s"), *ActorLabel));
@@ -506,58 +424,6 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetNiagaraParameter(const TSharedPtr<FJ
 	return MCPResult(Result);
 }
 
-TSharedPtr<FJsonValue> FNiagaraHandlers::CreateNiagaraSystemFromEmitter(const TSharedPtr<FJsonObject>& Params)
-{
-	FString SystemName;
-	if (auto Err = RequireString(Params, TEXT("systemName"), SystemName)) return Err;
-
-	FString EmitterPath;
-	if (auto Err = RequireString(Params, TEXT("emitterPath"), EmitterPath)) return Err;
-
-	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/VFX"));
-	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
-
-	if (auto Existing = MCPCheckAssetExists(PackagePath, SystemName, OnConflict, TEXT("NiagaraSystem")))
-	{
-		return Existing;
-	}
-
-	UNiagaraEmitter* Emitter = LoadObject<UNiagaraEmitter>(nullptr, *EmitterPath);
-	if (!Emitter)
-	{
-		return MCPError(FString::Printf(TEXT("NiagaraEmitter not found: %s"), *EmitterPath));
-	}
-
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
-	UObject* NewAsset = AssetTools.CreateAsset(SystemName, PackagePath, UNiagaraSystem::StaticClass(), nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create NiagaraSystem"));
-	}
-
-	UNiagaraSystem* NewSystem = Cast<UNiagaraSystem>(NewAsset);
-	if (!NewSystem)
-	{
-		return MCPError(TEXT("Created asset is not a NiagaraSystem"));
-	}
-
-	NewSystem->MarkPackageDirty();
-	FNiagaraEmitterHandle EmitterHandle = NewSystem->AddEmitterHandle(*Emitter, Emitter->GetFName(), FGuid::NewGuid());
-
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
-
-	auto Result = MCPSuccess();
-	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("systemPath"), NewAsset->GetPathName());
-	Result->SetStringField(TEXT("systemName"), SystemName);
-	Result->SetStringField(TEXT("emitterPath"), EmitterPath);
-	Result->SetStringField(TEXT("emitterHandleName"), EmitterHandle.GetName().ToString());
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
-	return MCPResult(Result);
-}
-
 TSharedPtr<FJsonValue> FNiagaraHandlers::AddEmitterToSystem(const TSharedPtr<FJsonObject>& Params)
 {
 	FString SystemPath;
@@ -566,8 +432,21 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::AddEmitterToSystem(const TSharedPtr<FJs
 	FString EmitterPath;
 	if (auto Err = RequireString(Params, TEXT("emitterPath"), EmitterPath)) return Err;
 
-	UNiagaraSystem* System = Cast<UNiagaraSystem>(UEditorAssetLibrary::LoadAsset(SystemPath));
-	UNiagaraEmitter* Emitter = Cast<UNiagaraEmitter>(UEditorAssetLibrary::LoadAsset(EmitterPath));
+	// #223: EditorAssetLibrary::LoadAsset returned None for valid Niagara
+	// asset paths (likely a class-resolution mismatch). Use LoadObject<>
+	// directly which mirrors what unreal.load_object does in Python.
+	auto LoadEither = [](const FString& Path) -> UObject*
+	{
+		FString WithSuffix = Path;
+		if (UObject* Hit = LoadObject<UObject>(nullptr, *WithSuffix)) return Hit;
+		const FString BaseName = FPaths::GetBaseFilename(Path);
+		WithSuffix = FString::Printf(TEXT("%s.%s"), *Path, *BaseName);
+		if (UObject* Hit = LoadObject<UObject>(nullptr, *WithSuffix)) return Hit;
+		return UEditorAssetLibrary::LoadAsset(Path);
+	};
+
+	UNiagaraSystem* System = Cast<UNiagaraSystem>(LoadEither(SystemPath));
+	UNiagaraEmitter* Emitter = Cast<UNiagaraEmitter>(LoadEither(EmitterPath));
 
 	if (!System)
 	{
@@ -594,17 +473,46 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::AddEmitterToSystem(const TSharedPtr<FJs
 		}
 	}
 
-	// Actually add the emitter to the system (#69)
-	System->Modify();
-	FNiagaraEmitterHandle Handle = System->AddEmitterHandle(*Emitter, Emitter->GetFName(), FGuid::NewGuid());
+	// #275: the original implementation called System->AddEmitterHandle
+	// directly, which crashed the editor when the parent system had zero
+	// emitters (live system instances were not killed before mutating the
+	// handle list, the overview graph wasn't rebuilt, and name collisions
+	// against the system's outer triggered a checkSlow). Use the canonical
+	// NiagaraEditor helper instead - it kills system instances, resolves a
+	// unique handle name, calls RebuildEmitterNodes, and synchronizes the
+	// system's overview graph. This is the same path the editor uses for
+	// "Add Emitter to System" in the Niagara System editor.
+	const FGuid EmitterVersion = Emitter->GetExposedVersion().VersionGuid;
+	const FGuid HandleId = FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Emitter, EmitterVersion);
+	if (!HandleId.IsValid())
+	{
+		return MCPError(FString::Printf(TEXT("FNiagaraEditorUtilities::AddEmitterToSystem returned invalid handle for %s"), *EmitterPath));
+	}
 
-	UEditorAssetLibrary::SaveAsset(System->GetPathName());
+	// #223: SaveAsset by path resolved a different in-memory instance and
+	// dropped the new handle. Save the loaded system object directly.
+	System->PostEditChange();
+	System->MarkPackageDirty();
+	UEditorAssetLibrary::SaveLoadedAsset(System, /*bOnlyIfIsDirty=*/false);
+
+	// Re-find the handle by id so the response reports the actual stored name
+	// (AddEmitterToSystem deduplicates / renumbers when there's a collision).
+	FName StoredHandleName = NAME_None;
+	for (const FNiagaraEmitterHandle& H : System->GetEmitterHandles())
+	{
+		if (H.GetId() == HandleId)
+		{
+			StoredHandleName = H.GetName();
+			break;
+		}
+	}
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
 	Result->SetStringField(TEXT("systemPath"), SystemPath);
 	Result->SetStringField(TEXT("emitterPath"), EmitterPath);
-	Result->SetStringField(TEXT("emitterHandleName"), Handle.GetName().ToString());
+	Result->SetStringField(TEXT("emitterHandleName"), StoredHandleName.ToString());
+	Result->SetStringField(TEXT("emitterHandleId"), HandleId.ToString());
 	Result->SetNumberField(TEXT("emitterCount"), System->GetEmitterHandles().Num());
 	// No rollback: no paired remove_emitter_from_system handler.
 	return MCPResult(Result);
@@ -1024,18 +932,9 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateNiagaraSystemFromSpec(const TShar
 	const TArray<TSharedPtr<FJsonValue>>* EmittersArr = nullptr;
 	Params->TryGetArrayField(TEXT("emitters"), EmittersArr);
 
-	if (auto Hit = MCPCheckAssetExists(PackagePath, Name, OptionalString(Params, TEXT("onConflict"), TEXT("skip")), TEXT("NiagaraSystem")))
-	{
-		return Hit;
-	}
-
-	const FString PkgName = PackagePath + TEXT("/") + Name;
-	UPackage* Package = CreatePackage(*PkgName);
-	UNiagaraSystem* System = NewObject<UNiagaraSystem>(Package, UNiagaraSystem::StaticClass(), *Name, RF_Public | RF_Standalone);
-	if (!System) return MCPError(TEXT("Failed to create NiagaraSystem"));
-	FAssetRegistryModule::AssetCreated(System);
-	System->MarkPackageDirty();
-	Package->SetDirtyFlag(true);
+	auto Created = MCPCreateAssetIdempotentNewObject<UNiagaraSystem>(Name, PackagePath, OptionalString(Params, TEXT("onConflict"), TEXT("skip")), TEXT("NiagaraSystem"));
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UNiagaraSystem* System = Created.Asset;
 
 	int32 AddedEmitters = 0;
 	if (EmittersArr)
@@ -1046,11 +945,22 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateNiagaraSystemFromSpec(const TShar
 			if (!V->TryGetObject(EmitterObj)) continue;
 			FString EmitterPath;
 			if (!(*EmitterObj)->TryGetStringField(TEXT("path"), EmitterPath)) continue;
-			UNiagaraEmitter* Source = Cast<UNiagaraEmitter>(UEditorAssetLibrary::LoadAsset(EmitterPath));
+			// #223: same load-asset gap as add_emitter_to_system - use
+			// LoadObject<> with both bare and Path.Path forms.
+			UNiagaraEmitter* Source = LoadObject<UNiagaraEmitter>(nullptr, *EmitterPath);
+			if (!Source)
+			{
+				const FString WithSuffix = FString::Printf(TEXT("%s.%s"), *EmitterPath, *FPaths::GetBaseFilename(EmitterPath));
+				Source = LoadObject<UNiagaraEmitter>(nullptr, *WithSuffix);
+			}
+			if (!Source) Source = Cast<UNiagaraEmitter>(UEditorAssetLibrary::LoadAsset(EmitterPath));
 			if (!Source) continue;
 			const FGuid Version = Source->GetExposedVersion().VersionGuid;
-			System->AddEmitterHandle(*Source, FName(*Source->GetName()), Version);
-			++AddedEmitters;
+			// #275: route through FNiagaraEditorUtilities so we get
+			// KillSystemInstances + RebuildEmitterNodes + unique-name
+			// resolution instead of mutating the handle list raw.
+			const FGuid HandleId = FNiagaraEditorUtilities::AddEmitterToSystem(*System, *Source, Version);
+			if (HandleId.IsValid()) ++AddedEmitters;
 		}
 	}
 
@@ -1482,18 +1392,12 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateModuleFromHlsl(const TSharedPtr<F
 	if (auto Err = RequireString(Params, TEXT("hlsl"), Hlsl)) return Err;
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/VFX/Modules"));
 
-	if (auto Hit = MCPCheckAssetExists(PackagePath, Name, OptionalString(Params, TEXT("onConflict"), TEXT("skip")), TEXT("NiagaraScript")))
-	{
-		return Hit;
-	}
-
 	// Use the stock module factory to create a baseline module with Param-map get/set scaffolding,
 	// then add a CustomHLSL node that carries the user's HLSL body.
 	UNiagaraModuleScriptFactory* Factory = NewObject<UNiagaraModuleScriptFactory>();
-	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
-	UObject* NewObj = AssetTools.CreateAsset(Name, PackagePath, UNiagaraScript::StaticClass(), Factory);
-	UNiagaraScript* Script = Cast<UNiagaraScript>(NewObj);
-	if (!Script) return MCPError(TEXT("Failed to create NiagaraScript"));
+	auto Created = MCPCreateAssetIdempotent<UNiagaraScript>(Name, PackagePath, OptionalString(Params, TEXT("onConflict"), TEXT("skip")), TEXT("NiagaraScript"), Factory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UNiagaraScript* Script = Created.Asset;
 
 	UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(Script->GetLatestSource());
 	UNiagaraGraph* Graph = Source ? Source->NodeGraph : nullptr;
@@ -1548,20 +1452,11 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateScratchModule(const TSharedPtr<FJ
 	if (auto Err = RequireString(Params, TEXT("name"), Name)) return Err;
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/VFX"));
 
-	if (auto Hit = MCPCheckAssetExists(PackagePath, Name, OptionalString(Params, TEXT("onConflict"), TEXT("skip")), TEXT("NiagaraScript")))
-	{
-		return Hit;
-	}
-
 	// Use the stock Niagara module factory to create a baseline module script
 	UNiagaraModuleScriptFactory* Factory = NewObject<UNiagaraModuleScriptFactory>();
-	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
-	UObject* NewObj = AssetTools.CreateAsset(Name, PackagePath, UNiagaraScript::StaticClass(), Factory);
-	UNiagaraScript* Script = Cast<UNiagaraScript>(NewObj);
-	if (!Script)
-	{
-		return MCPError(TEXT("Failed to create NiagaraScript module. Ensure Niagara plugin is enabled."));
-	}
+	auto Created = MCPCreateAssetIdempotent<UNiagaraScript>(Name, PackagePath, OptionalString(Params, TEXT("onConflict"), TEXT("skip")), TEXT("NiagaraScript"), Factory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UNiagaraScript* Script = Created.Asset;
 
 	UNiagaraScriptSource* Source = Cast<UNiagaraScriptSource>(Script->GetLatestSource());
 	UNiagaraGraph* Graph = Source ? Source->NodeGraph : nullptr;

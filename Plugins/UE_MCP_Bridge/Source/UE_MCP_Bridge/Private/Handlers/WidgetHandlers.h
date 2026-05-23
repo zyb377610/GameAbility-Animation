@@ -15,7 +15,6 @@ private:
 	static TSharedPtr<FJsonValue> ReadWidgetTree(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateEditorUtilityWidget(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateEditorUtilityBlueprint(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> SearchWidgetByName(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetWidgetProperties(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetWidgetProperty(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadWidgetAnimations(const TSharedPtr<FJsonObject>& Params);
@@ -24,6 +23,10 @@ private:
 	static TSharedPtr<FJsonValue> AddWidget(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RemoveWidget(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> MoveWidget(const TSharedPtr<FJsonObject>& Params);
+	// #365: root-widget swap + "Wrap With" container insertion. Required to
+	// reshape an existing WBP root without rebuilding the whole tree.
+	static TSharedPtr<FJsonValue> SetRoot(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> WrapRoot(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListWidgetClasses(const TSharedPtr<FJsonObject>& Params);
 
 	// Runtime (PIE) widget inspection (#160)

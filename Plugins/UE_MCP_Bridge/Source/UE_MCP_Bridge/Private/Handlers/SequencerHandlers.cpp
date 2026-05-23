@@ -1,6 +1,7 @@
 #include "SequencerHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerAssetCreate.h"
 #include "LevelSequence.h"
 #include "LevelSequenceActor.h"
 // LevelSequenceFactoryNew may not be available; use AssetTools directly
@@ -33,11 +34,6 @@
 void FSequencerHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 {
 	Registry.RegisterHandler(TEXT("create_level_sequence"), &CreateLevelSequence);
-	Registry.RegisterHandler(TEXT("read_sequence_info"), &ReadSequenceInfo);
-	Registry.RegisterHandler(TEXT("add_track"), &AddTrack);
-	Registry.RegisterHandler(TEXT("sequence_control"), &SequenceControl);
-
-	// Aliases
 	Registry.RegisterHandler(TEXT("get_sequence_info"), &ReadSequenceInfo);
 	Registry.RegisterHandler(TEXT("add_sequence_track"), &AddTrack);
 	Registry.RegisterHandler(TEXT("play_sequence"), &SequenceControl);
@@ -51,34 +47,16 @@ TSharedPtr<FJsonValue> FSequencerHandlers::CreateLevelSequence(const TSharedPtr<
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Cinematics"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("LevelSequence")))
-	{
-		return Existing;
-	}
-
-	FString FullPackagePath = PackagePath / Name;
-	UPackage* Package = CreatePackage(*FullPackagePath);
-	if (!Package)
-	{
-		return MCPError(FString::Printf(TEXT("Failed to create package at '%s'"), *FullPackagePath));
-	}
-
-	ULevelSequence* NewSequence = NewObject<ULevelSequence>(Package, FName(*Name), RF_Public | RF_Standalone);
+	auto Created = MCPCreateAssetIdempotentNewObject<ULevelSequence>(Name, PackagePath, OnConflict, TEXT("LevelSequence"));
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	ULevelSequence* NewSequence = Created.Asset;
 	NewSequence->Initialize();
-
-	if (!NewSequence)
-	{
-		return MCPError(TEXT("Failed to create LevelSequence asset"));
-	}
-
-	FAssetRegistryModule::AssetCreated(NewSequence);
-	Package->MarkPackageDirty();
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
 	Result->SetStringField(TEXT("name"), Name);
 	Result->SetStringField(TEXT("path"), NewSequence->GetPathName());
-	Result->SetStringField(TEXT("packagePath"), FullPackagePath);
+	Result->SetStringField(TEXT("packagePath"), PackagePath + TEXT("/") + Name);
 	MCPSetDeleteAssetRollback(Result, NewSequence->GetPathName());
 
 	return MCPResult(Result);
@@ -324,17 +302,7 @@ TSharedPtr<FJsonValue> FSequencerHandlers::AddTrack(const TSharedPtr<FJsonObject
 		// Find the binding for this actor
 		REQUIRE_EDITOR_WORLD(World);
 
-		// Find actor by label
-		AActor* TargetActor = nullptr;
-		for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-		{
-			if ((*ActorIt)->GetActorLabel() == ActorLabel)
-			{
-				TargetActor = *ActorIt;
-				break;
-			}
-		}
-
+		AActor* TargetActor = FindActorByLabel(World, ActorLabel);
 		if (!TargetActor)
 		{
 			return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));

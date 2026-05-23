@@ -6,6 +6,7 @@
 #include "AnimationHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerAssetCreate.h"
 #include "Engine/Blueprint.h"
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimMontage.h"
@@ -23,6 +24,8 @@
 #include "AnimationTransitionGraph.h"
 #include "AnimStateNode.h"
 #include "AnimStateTransitionNode.h"
+#include "RetargetEditor/IKRetargeterController.h"
+#include "Retargeter/IKRetargeter.h"
 #include "AnimGraphNode_SequencePlayer.h"
 #include "AnimGraphNode_BlendSpacePlayer.h"
 #include "Rig/IKRigDefinition.h"
@@ -43,6 +46,19 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
+
+// UPoseSearchDatabase's "asset count" accessor was renamed between 5.4 and 5.5:
+//   5.4: GetAnimationAssets().Num()
+//   5.5+: GetNumAnimationAssets()
+// Use one helper so the call sites stay readable.
+static int32 GetPoseSearchAssetCount(const UPoseSearchDatabase* Database)
+{
+#if UE_MCP_HAS_5_5_API
+	return Database->GetNumAnimationAssets();
+#else
+	return GetPoseSearchAssetCount(Database);
+#endif
+}
 
 // ─── State Machine Helpers ────────────────────────────────────────
 
@@ -733,11 +749,6 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateIKRig(const TSharedPtr<FJsonObj
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Hit = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("IKRigDefinition")))
-	{
-		return Hit;
-	}
-
 	// Load the skeletal mesh to get the skeleton
 	USkeletalMesh* SkelMesh = LoadObject<USkeletalMesh>(nullptr, *SkeletalMeshPath);
 	if (!SkelMesh)
@@ -745,20 +756,15 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateIKRig(const TSharedPtr<FJsonObj
 		return MCPError(FString::Printf(TEXT("Failed to load SkeletalMesh at '%s'"), *SkeletalMeshPath));
 	}
 
-	// Create the IKRigDefinition asset via AssetTools
-	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
 	UFactory* Factory = NewObject<UFactory>(GetTransientPackage(), FindObject<UClass>(nullptr, TEXT("/Script/IKRigEditor.IKRigDefinitionFactory")));
 	if (!Factory)
 	{
-		return MCPError(TEXT("IKRigDefinitionFactory not found — is the IKRig plugin enabled?"));
+		return MCPError(TEXT("IKRigDefinitionFactory not found - is the IKRig plugin enabled?"));
 	}
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, UIKRigDefinition::StaticClass(), Factory);
-	UIKRigDefinition* IKRig = Cast<UIKRigDefinition>(NewAsset);
-	if (!IKRig)
-	{
-		return MCPError(TEXT("Failed to create IKRigDefinition asset"));
-	}
+	auto Created = MCPCreateAssetIdempotent<UIKRigDefinition>(Name, PackagePath, OnConflict, TEXT("IKRigDefinition"), Factory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UIKRigDefinition* IKRig = Created.Asset;
 
 	// Prefer IKRigController to atomically configure the rig (#97, #103)
 	int32 ChainsAdded = 0;
@@ -926,16 +932,10 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateIKRetargeter(const TSharedPtr<F
 	FString TargetRigPath = OptionalString(Params, TEXT("targetRig"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Hit = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("IKRetargeter")))
-	{
-		return Hit;
-	}
-
-	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
 	UClass* FactoryClass = FindObject<UClass>(nullptr, TEXT("/Script/IKRigEditor.IKRetargetFactory"));
 	if (!FactoryClass)
 	{
-		return MCPError(TEXT("IKRetargetFactory not found — is the IKRig plugin enabled?"));
+		return MCPError(TEXT("IKRetargetFactory not found - is the IKRig plugin enabled?"));
 	}
 	UClass* RetargeterClass = FindObject<UClass>(nullptr, TEXT("/Script/IKRig.IKRetargeter"));
 	if (!RetargeterClass)
@@ -943,11 +943,10 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateIKRetargeter(const TSharedPtr<F
 		return MCPError(TEXT("IKRetargeter class not found"));
 	}
 	UFactory* Factory = NewObject<UFactory>(GetTransientPackage(), FactoryClass);
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, RetargeterClass, Factory);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create IKRetargeter asset"));
-	}
+
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("IKRetargeter"), RetargeterClass, Factory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UObject* NewAsset = Created.Asset;
 
 	// Optionally set source / target IK Rigs via reflection
 	auto SetRigProperty = [&](const FString& PropName, const FString& Path) -> FString
@@ -965,6 +964,59 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateIKRetargeter(const TSharedPtr<F
 	FString SrcErr = SetRigProperty(TEXT("SourceIKRigAsset"), SourceRigPath);
 	FString TgtErr = SetRigProperty(TEXT("TargetIKRigAsset"), TargetRigPath);
 
+	// UE 5.7+ ops-stack initialization (#246). After CreateAsset the per-op
+	// IK Rig refs and chain mappings are unset, so the retargeter cannot be
+	// driven by an Anim Graph. Mirror what the Python workaround does:
+	// AssignIKRigToAllOps(SOURCE/TARGET) + AutoMapChains.
+	bool bAutoMap = OptionalBool(Params, TEXT("autoMapChains"), true);
+	int32 ChainsMapped = 0;
+	FString OpsWarning;
+	if (bAutoMap)
+	{
+		UIKRetargeter* Retargeter = Cast<UIKRetargeter>(NewAsset);
+		if (Retargeter)
+		{
+			UIKRetargeterController* Controller = UIKRetargeterController::GetController(Retargeter);
+			if (Controller)
+			{
+#if UE_MCP_HAS_5_5_API
+				if (!SourceRigPath.IsEmpty())
+				{
+					if (UIKRigDefinition* SrcRig = Cast<UIKRigDefinition>(LoadObject<UObject>(nullptr, *SourceRigPath)))
+					{
+						Controller->AssignIKRigToAllOps(ERetargetSourceOrTarget::Source, SrcRig);
+					}
+				}
+				if (!TargetRigPath.IsEmpty())
+				{
+					if (UIKRigDefinition* TgtRig = Cast<UIKRigDefinition>(LoadObject<UObject>(nullptr, *TargetRigPath)))
+					{
+						Controller->AssignIKRigToAllOps(ERetargetSourceOrTarget::Target, TgtRig);
+					}
+				}
+				Controller->AutoMapChains(EAutoMapChainType::Exact, true);
+				// AutoMapChains returns void in UE 5.7; count populated mappings by re-querying.
+				if (const UIKRigDefinition* TgtRig2 = Controller->GetIKRig(ERetargetSourceOrTarget::Target))
+				{
+					for (const FBoneChain& C : TgtRig2->GetRetargetChains())
+					{
+						if (!Controller->GetSourceChain(C.ChainName).IsNone()) ChainsMapped++;
+					}
+				}
+#else
+				// 5.4 has no ops-stack: per-op rig assignment + AutoMapChains(EAutoMapChainType,bool)
+				// don't exist. The retargeter still works from SourceIKRigAsset/TargetIKRigAsset
+				// properties; chain auto-mapping must be triggered manually in the IK Retargeter editor.
+				OpsWarning = TEXT("autoMapChains requires UE 5.5+; open the IK Retargeter and auto-map chains manually.");
+#endif
+			}
+			else
+			{
+				OpsWarning = TEXT("IKRetargeterController unavailable - chains not mapped (call autoMapChains=false to suppress)");
+			}
+		}
+	}
+
 	NewAsset->MarkPackageDirty();
 	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
 
@@ -974,7 +1026,57 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateIKRetargeter(const TSharedPtr<F
 	Result->SetStringField(TEXT("name"), Name);
 	if (!SrcErr.IsEmpty()) Result->SetStringField(TEXT("sourceRigWarning"), SrcErr);
 	if (!TgtErr.IsEmpty()) Result->SetStringField(TEXT("targetRigWarning"), TgtErr);
+	if (bAutoMap)
+	{
+		Result->SetNumberField(TEXT("chainsMapped"), ChainsMapped);
+		if (!OpsWarning.IsEmpty()) Result->SetStringField(TEXT("opsWarning"), OpsWarning);
+	}
 	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	return MCPResult(Result);
+}
+
+// ─── #246  read_ik_retargeter ──────────────────────────────────────────
+TSharedPtr<FJsonValue> FAnimationHandlers::ReadIKRetargeter(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireString(Params, TEXT("assetPath"), AssetPath)) return Err;
+
+	UIKRetargeter* Retargeter = Cast<UIKRetargeter>(LoadObject<UObject>(nullptr, *AssetPath));
+	if (!Retargeter)
+	{
+		return MCPError(FString::Printf(TEXT("IKRetargeter not found: %s"), *AssetPath));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
+
+	UIKRetargeterController* Controller = UIKRetargeterController::GetController(Retargeter);
+	if (!Controller)
+	{
+		Result->SetStringField(TEXT("warning"), TEXT("IKRetargeterController unavailable — returning shallow data"));
+		return MCPResult(Result);
+	}
+
+	const UIKRigDefinition* SrcRig = Controller->GetIKRig(ERetargetSourceOrTarget::Source);
+	const UIKRigDefinition* TgtRig = Controller->GetIKRig(ERetargetSourceOrTarget::Target);
+	Result->SetStringField(TEXT("sourceRig"), SrcRig ? SrcRig->GetPathName() : TEXT(""));
+	Result->SetStringField(TEXT("targetRig"), TgtRig ? TgtRig->GetPathName() : TEXT(""));
+
+	// Chain mappings: for each target chain, report the source chain it's mapped to.
+	TArray<TSharedPtr<FJsonValue>> Mappings;
+	if (TgtRig)
+	{
+		const TArray<FBoneChain>& TargetChains = TgtRig->GetRetargetChains();
+		for (const FBoneChain& TgtChain : TargetChains)
+		{
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("targetChain"), TgtChain.ChainName.ToString());
+			FName SourceChain = Controller->GetSourceChain(TgtChain.ChainName);
+			Entry->SetStringField(TEXT("sourceChain"), SourceChain.IsNone() ? TEXT("") : SourceChain.ToString());
+			Mappings.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+	}
+	Result->SetArrayField(TEXT("chainMappings"), Mappings);
 	return MCPResult(Result);
 }
 
@@ -992,15 +1094,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreatePoseSearchDatabase(const TShare
 	const FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/MotionMatching"));
 	const FString SchemaPath = OptionalString(Params, TEXT("schemaPath"), TEXT(""));
 
-	if (auto Hit = MCPCheckAssetExists(PackagePath, Name, OptionalString(Params, TEXT("onConflict"), TEXT("skip")), TEXT("PoseSearchDatabase")))
-	{
-		return Hit;
-	}
-
-	const FString PkgName = PackagePath + TEXT("/") + Name;
-	UPackage* Package = CreatePackage(*PkgName);
-	UPoseSearchDatabase* Database = NewObject<UPoseSearchDatabase>(Package, UPoseSearchDatabase::StaticClass(), *Name, RF_Public | RF_Standalone);
-	if (!Database) return MCPError(TEXT("Failed to create PoseSearchDatabase"));
+	auto Created = MCPCreateAssetIdempotentNewObject<UPoseSearchDatabase>(Name, PackagePath, OptionalString(Params, TEXT("onConflict"), TEXT("skip")), TEXT("PoseSearchDatabase"));
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UPoseSearchDatabase* Database = Created.Asset;
 
 	if (!SchemaPath.IsEmpty())
 	{
@@ -1009,9 +1105,6 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreatePoseSearchDatabase(const TShare
 		Database->Schema = Schema;
 	}
 
-	FAssetRegistryModule::AssetCreated(Database);
-	Database->MarkPackageDirty();
-	Package->SetDirtyFlag(true);
 	UEditorAssetLibrary::SaveLoadedAsset(Database);
 
 	TSharedPtr<FJsonObject> Res = MCPSuccess();
@@ -1058,8 +1151,6 @@ TSharedPtr<FJsonValue> FAnimationHandlers::SetPoseSearchSchema(const TSharedPtr<
 }
 
 
-// UE 5.6 incompatible: FPoseSearchDatabaseAnimationAsset / GetDatabaseAnimationAsset API removed
-#if 0
 TSharedPtr<FJsonValue> FAnimationHandlers::AddPoseSearchSequence(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
@@ -1079,7 +1170,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddPoseSearchSequence(const TSharedPt
 		return MCPError(FString::Printf(TEXT("Animation asset type not supported by PoseSearch: %s"), *AnimAsset->GetClass()->GetName()));
 	}
 
-	const int32 PrevCount = Database->GetNumAnimationAssets();
+	const int32 PrevCount = GetPoseSearchAssetCount(Database);
 	FPoseSearchDatabaseAnimationAsset NewEntry;
 	NewEntry.AnimAsset = AnimAsset;
 	Database->Modify();
@@ -1087,7 +1178,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddPoseSearchSequence(const TSharedPt
 	Database->PostEditChange();
 	UEditorAssetLibrary::SaveLoadedAsset(Database);
 
-	const int32 NewCount = Database->GetNumAnimationAssets();
+	const int32 NewCount = GetPoseSearchAssetCount(Database);
 
 	TSharedPtr<FJsonObject> Res = MCPSuccess();
 	MCPSetUpdated(Res);
@@ -1109,7 +1200,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::BuildPoseSearchIndex(const TSharedPtr
 	UPoseSearchDatabase* Database = Cast<UPoseSearchDatabase>(UEditorAssetLibrary::LoadAsset(AssetPath));
 	if (!Database) return MCPError(FString::Printf(TEXT("PoseSearchDatabase not found: %s"), *AssetPath));
 	if (!Database->Schema) return MCPError(TEXT("Database has no Schema set — call set_pose_search_schema first"));
-	if (Database->GetNumAnimationAssets() == 0) return MCPError(TEXT("Database has no animation assets — call add_pose_search_sequence first"));
+	if (GetPoseSearchAssetCount(Database) == 0) return MCPError(TEXT("Database has no animation assets — call add_pose_search_sequence first"));
 
 	using namespace UE::PoseSearch;
 	const ERequestAsyncBuildFlag Flag = bWait
@@ -1134,13 +1225,11 @@ TSharedPtr<FJsonValue> FAnimationHandlers::BuildPoseSearchIndex(const TSharedPtr
 	Res->SetStringField(TEXT("path"), AssetPath);
 	Res->SetStringField(TEXT("result"), ResultStr);
 	Res->SetBoolField(TEXT("waitedForCompletion"), bWait);
-	Res->SetNumberField(TEXT("animationAssetCount"), Database->GetNumAnimationAssets());
+	Res->SetNumberField(TEXT("animationAssetCount"), GetPoseSearchAssetCount(Database));
 	return MCPResult(Res);
 }
-#endif
 
-// UE 5.6 incompatible: FPoseSearchDatabaseAnimationAsset / GetDatabaseAnimationAsset API removed
-#if 0
+
 TSharedPtr<FJsonValue> FAnimationHandlers::ReadPoseSearchDatabase(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
@@ -1158,7 +1247,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ReadPoseSearchDatabase(const TSharedP
 	Res->SetNumberField(TEXT("loopingCostBias"), Database->LoopingCostBias);
 	Res->SetNumberField(TEXT("kdTreeQueryNumNeighbors"), Database->KDTreeQueryNumNeighbors);
 
-	const int32 AssetCount = Database->GetNumAnimationAssets();
+	const int32 AssetCount = GetPoseSearchAssetCount(Database);
 	Res->SetNumberField(TEXT("animationAssetCount"), AssetCount);
 
 	TArray<TSharedPtr<FJsonValue>> Animations;
@@ -1203,5 +1292,3 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ReadPoseSearchDatabase(const TSharedP
 
 	return MCPResult(Res);
 }
-#endif
-

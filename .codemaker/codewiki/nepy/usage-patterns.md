@@ -152,11 +152,10 @@ transform.scale3d = ue.Vector(1, 1, 2)
 ## 日志输出
 
 ```python
-ue.log("普通日志")           # 输出到 LogNePython
-ue.log_warning("警告日志")    # 输出到 LogNePython(Warning)
-print("Python print 也可用")  # print 也会输出到 LogNePython
-
-# ue.log_error 不存在！用 ue.log_warning 代替
+print("用 print 即可")           # 输出到 LogNePython
+ue.Log("普通日志")               # 大写 Log，Log 级别
+ue.LogWarning("警告日志")        # Warning 级别
+ue.LogError("错误日志")          # Error 级别
 ```
 
 ## 编辑器工具

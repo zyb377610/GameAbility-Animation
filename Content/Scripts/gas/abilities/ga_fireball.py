@@ -1,8 +1,20 @@
 # -*- encoding: utf-8 -*-
 """
-Step 1.2: 火球弹道技能完整链路
+Step 1.2 + Step 1.3: 火球弹道技能完整链路（含冷却与消耗）
 - GA_Fireball: 火球技能类，生成弹道、命中伤害
 - BP_Projectile: 弹道 Actor，飞行 + 碰撞检测 + 命中伤害
+
+Step 1.3 新增：
+- CooldownGameplayEffectClass → GE_Cooldown_Fireball
+- CostGameplayEffectClass → GE_Cost_Fireball
+- CommitAbility() 流程：检查消耗 + 启动冷却
+- ActivationBlockedTags → 冷却期间阻止激活
+
+⚠️ GE 配置说明：
+- GE_Cost_Fireball 的 Modifiers（扣减 Mana）需要在编辑器中创建蓝图子类配置，
+  原因同 Step 1.2 的 GE_Damage_Fireball（NePy ArrayWrapper 无法赋值 Modifiers）
+- GE_Cooldown_Fireball 的 Tag 由 TargetTagsGameplayEffectComponent 配置，可能导致同样问题
+- 如果 Python 中 Tag 配置失败，也需要蓝图资产。见 ge_cooldown.py 和 ge_cost.py 中的降级说明
 """
 import ue
 
@@ -11,7 +23,7 @@ import ue
 
 @ue.uclass()
 class GA_Fireball(ue.GameplayAbility):
-    """火球弹道技能：生成弹道 → 命中伤害"""
+    """火球弹道技能：CommitAbility 检查消耗/冷却 → 生成弹道 → 命中伤害"""
 
     def __init_default__(self):
         self.InstancingPolicy = (
@@ -21,12 +33,106 @@ class GA_Fireball(ue.GameplayAbility):
             ue.EGameplayAbilityNetExecutionPolicy.LocalPredicted
         )
 
+        # Step 1.3: 冷却 Tag 配置（无论 GE 是否通过蓝图配置，这些 Tag 容器都需要）
+        fireball_tag = ue.GameplayTag()
+        fireball_tag.TagName = "Ability.Fireball"
+        self.AbilityTags.GameplayTags.Append(fireball_tag)
+
+        cooldown_tag = ue.GameplayTag()
+        cooldown_tag.TagName = "Cooldown.Fireball"
+        self.ActivationBlockedTags.GameplayTags.Append(cooldown_tag)
+
+    def configure_ge_classes(self):
+        """运行时配置 Cooldown/Cost GE 类。
+        优先用蓝图资产（配置了 Tag/Modifiers），回退 Python 类。
+        """
+        # 冷却 GE: 优先蓝图
+        self.CooldownGameplayEffectClass = self._load_ge(
+            "BP_GE_Cooldown_Fireball", "gas.effects.ge_cooldown", "GE_Cooldown_Fireball")
+        # 消耗 GE: 优先蓝图
+        self.CostGameplayEffectClass = self._load_ge(
+            "BP_GE_Cost_Fireball", "gas.effects.ge_cost", "GE_Cost_Fireball")
+
+    def _load_ge(self, bp_name, module_name, class_name):
+        """加载 GE 类：优先 FindObject（PIE 可用），回退 Python 类"""
+        import importlib
+        path = f"/Game/Blueprint/GAS/{bp_name}.{bp_name}_C"
+        # 方式 1: FindObject
+        ge = ue.FindObject(path)
+        if ge:
+            print(f"[GA_Fireball] {bp_name} = FindObject")
+            return ge
+        # 方式 2: FindClass（不带 _C 后缀）
+        path2 = f"/Game/Blueprint/GAS/{bp_name}"
+        ge = ue.FindClass(path2)
+        if ge:
+            print(f"[GA_Fireball] {bp_name} = FindClass")
+            return ge
+        # 方式 3: Python 类
+        try:
+            mod = importlib.import_module(module_name)
+            cls = getattr(mod, class_name)
+            ge = cls.Class()
+            if ge:
+                print(f"[GA_Fireball] {bp_name} = Python 类")
+                return ge
+        except Exception:
+            pass
+        print(f"[GA_Fireball] 警告: 所有方式加载 {bp_name} 均失败")
+        return None
+
+    def try_commit_and_fire(self, asc, avatar):
+        """Step 1.3: 手动模拟 Commit 流程（CDO 无法调用真正的 CommitAbility）
+        1. 检查冷却 Tag
+        2. 检查 Mana 消耗
+        3. 手动 Apply Cost/Cooldown GE 到自身
+        4. 发射弹道
+        """
+        from gas.setup_character import AttrSet_Base
+
+        self.configure_ge_classes()
+
+        attr_set = asc.GetAttributeSet(AttrSet_Base.Class())
+        if not attr_set:
+            print("[GA_Fireball] 错误: 获取不到 AttributeSet")
+            return False
+
+        # 1. 检查冷却
+        cooldown_tag = ue.GameplayTag()
+        cooldown_tag.TagName = "Cooldown.Fireball"
+        if asc.GetGameplayTagCount(cooldown_tag) > 0:
+            print("[GA_Fireball] 冷却中，无法激活")
+            return False
+
+        # 2. 检查 Mana
+        cost_amount = 20.0
+        if attr_set.Mana < cost_amount:
+            print(f"[GA_Fireball] Mana 不足 ({attr_set.Mana}/{attr_set.MaxMana})")
+            return False
+
+        # 3. 手动 Apply Cost GE
+        if self.CostGameplayEffectClass:
+            ctx = asc.MakeEffectContext()
+            spec = asc.MakeOutgoingSpec(self.CostGameplayEffectClass, 1.0, ctx)
+            asc.ApplyGameplayEffectSpecToSelf(spec)
+            print("[GA_Fireball] Cost GE 已应用")
+
+        # 4. 手动 Apply Cooldown GE
+        if self.CooldownGameplayEffectClass:
+            ctx = asc.MakeEffectContext()
+            spec = asc.MakeOutgoingSpec(self.CooldownGameplayEffectClass, 1.0, ctx)
+            asc.ApplyGameplayEffectSpecToSelf(spec)
+            print("[GA_Fireball] Cooldown GE 已应用")
+
+        print(f"[GA_Fireball] 消耗成功 — Mana 剩余 {attr_set.Mana}")
+        self.do_fireball(asc, avatar)
+        return True
+
     def do_fireball(self, asc, avatar):
-        """技能主逻辑：由外部传入 ASC 和 Avatar Actor"""
+        """技能主逻辑：生成弹道"""
         # 生成位置：角色头顶偏上
         spawn_location = avatar.GetActorLocation()
         spawn_location.z += 100.0
-        forward = avatar.GetActorForwardVector()
 
         transform = ue.Transform()
         transform.Translation = spawn_location
@@ -76,9 +182,10 @@ class GA_Fireball(ue.GameplayAbility):
             print("[GA_Fireball] 错误: owner_asc 无效")
             return
 
-        # 加载蓝图 GE 资产
-        ge_class = ue.LoadObject(ue.GameplayEffect,
-            "/Game/Blueprints/GAS/GE_Damage_Fireball.GE_Damage_Fireball_C")
+        # 加载 GE_Damage 蓝图资产
+        ge_class = (ue.FindObject(
+            "/Game/Blueprint/GAS/GE_Damage_Fireball.GE_Damage_Fireball_C")
+            or ue.FindClass("/Game/Blueprint/GAS/GE_Damage_Fireball"))
         if not ge_class:
             print("[GA_Fireball] 错误: 加载 GE_Damage_Fireball 失败")
             return

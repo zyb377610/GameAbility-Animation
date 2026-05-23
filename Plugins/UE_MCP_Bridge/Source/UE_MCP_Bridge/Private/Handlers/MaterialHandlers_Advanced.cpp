@@ -44,93 +44,6 @@
 #include "ImageUtils.h"
 
 
-TSharedPtr<FJsonValue> FMaterialHandlers::CreateMaterialFromTexture(const TSharedPtr<FJsonObject>& Params)
-{
-	FString TexturePath;
-	if (auto Err = RequireString(Params, TEXT("texturePath"), TexturePath)) return Err;
-
-	FString MaterialName = OptionalString(Params, TEXT("materialName"));
-	if (MaterialName.IsEmpty())
-	{
-		FString TextureName = FPaths::GetBaseFilename(TexturePath);
-		MaterialName = TEXT("M_") + TextureName;
-	}
-
-	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Materials"));
-	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
-
-	if (auto Existing = MCPCheckAssetExists(PackagePath, MaterialName, OnConflict, TEXT("Material")))
-	{
-		return Existing;
-	}
-
-	// Load the texture
-	UTexture* Texture = Cast<UTexture>(StaticLoadObject(UTexture::StaticClass(), nullptr, *TexturePath));
-	if (!Texture)
-	{
-		Texture = Cast<UTexture>(StaticLoadObject(UTexture::StaticClass(), nullptr,
-			*(TEXT("Texture2D'") + TexturePath + TEXT("'"))));
-	}
-	if (!Texture)
-	{
-		return MCPError(FString::Printf(TEXT("Failed to load texture at '%s'"), *TexturePath));
-	}
-
-	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] CreateMaterialFromTexture: texture=%s materialName=%s packagePath=%s"), *TexturePath, *MaterialName, *PackagePath);
-
-	// Create the material
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
-	UMaterialFactoryNew* MaterialFactory = NewObject<UMaterialFactoryNew>();
-	UObject* NewAsset = AssetTools.CreateAsset(MaterialName, PackagePath, UMaterial::StaticClass(), MaterialFactory);
-
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create material asset"));
-	}
-
-	UMaterial* NewMaterial = Cast<UMaterial>(NewAsset);
-	if (!NewMaterial)
-	{
-		return MCPError(TEXT("Created asset is not a material"));
-	}
-
-	NewMaterial->PreEditChange(nullptr);
-
-	// Create a TextureSample expression
-	UMaterialExpressionTextureSample* TextureSampleExpr = NewObject<UMaterialExpressionTextureSample>(NewMaterial);
-	TextureSampleExpr->Texture = Texture;
-	TextureSampleExpr->MaterialExpressionEditorX = -300;
-	TextureSampleExpr->MaterialExpressionEditorY = 0;
-
-	// Add expression to material
-	NewMaterial->GetExpressionCollection().AddExpression(TextureSampleExpr);
-
-	// Connect the RGB output (index 0) to the BaseColor input
-	if (UMaterialEditorOnlyData* EOD = NewMaterial->GetEditorOnlyData())
-	{
-		EOD->BaseColor.Connect(0, TextureSampleExpr);
-	}
-
-	NewMaterial->PostEditChange();
-
-	// Save the package
-	SaveAssetPackage(NewMaterial);
-
-	auto Result = MCPSuccess();
-	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("materialPath"), NewMaterial->GetPathName());
-	Result->SetStringField(TEXT("materialName"), MaterialName);
-	Result->SetStringField(TEXT("texturePath"), Texture->GetPathName());
-	Result->SetStringField(TEXT("packagePath"), PackagePath);
-	Result->SetNumberField(TEXT("expressionCount"), NewMaterial->GetExpressions().Num());
-	MCPSetDeleteAssetRollback(Result, NewMaterial->GetPathName());
-
-	return MCPResult(Result);
-}
-
-
 // ===========================================================================
 // v0.7.9 — Material depth
 // ===========================================================================
@@ -183,6 +96,7 @@ TSharedPtr<FJsonValue> FMaterialHandlers::ValidateMaterial(const TSharedPtr<FJso
 	while (Stack.Num() > 0)
 	{
 		UMaterialExpression* Expr = Stack.Pop();
+#if UE_MCP_HAS_5_5_API
 		for (FExpressionInputIterator It{ Expr }; It; ++It)
 		{
 			if (It->Expression && !Referenced.Contains(It->Expression))
@@ -191,6 +105,18 @@ TSharedPtr<FJsonValue> FMaterialHandlers::ValidateMaterial(const TSharedPtr<FJso
 				Stack.Add(It->Expression);
 			}
 		}
+#else
+		// FExpressionInputIterator was added in 5.5; on 5.4 use the legacy GetInput(i) loop.
+		for (int32 InputIdx = 0, InputCount = Expr->GetInputs().Num(); InputIdx < InputCount; ++InputIdx)
+		{
+			FExpressionInput* In = Expr->GetInput(InputIdx);
+			if (In && In->Expression && !Referenced.Contains(In->Expression))
+			{
+				Referenced.Add(In->Expression);
+				Stack.Add(In->Expression);
+			}
+		}
+#endif
 	}
 
 	auto AllExpressions = Material->GetExpressions();
@@ -216,6 +142,36 @@ TSharedPtr<FJsonValue> FMaterialHandlers::ValidateMaterial(const TSharedPtr<FJso
 				Issue->SetStringField(TEXT("kind"), TEXT("null_texture_reference"));
 				Issue->SetStringField(TEXT("expression"), Expr->GetName());
 				Issues.Add(MakeShared<FJsonValueObject>(Issue));
+			}
+
+			// #318 gap 7: UV type sanity check. TextureSample.Coordinates expects
+			// a 2-channel UV vector. Wiring a 3-channel world-position (or any
+			// non-UV3D-sized source) into it compiles but samples garbage. The
+			// silent failure mode is hours of "why does my texture look wrong"
+			// debugging. Flag the obvious cases - WorldPosition / ObjectPosition
+			// / ActorPosition / CameraPosition wired into Coordinates.
+			if (TS->Coordinates.Expression)
+			{
+				UMaterialExpression* CoordSrc = TS->Coordinates.Expression;
+				const FString SrcClass = CoordSrc->GetClass()->GetName();
+				static const TArray<FString> ThreeDPositionSources = {
+					TEXT("MaterialExpressionWorldPosition"),
+					TEXT("MaterialExpressionObjectPositionWS"),
+					TEXT("MaterialExpressionActorPositionWS"),
+					TEXT("MaterialExpressionCameraPositionWS"),
+				};
+				if (ThreeDPositionSources.Contains(SrcClass))
+				{
+					TSharedPtr<FJsonObject> Issue = MakeShared<FJsonObject>();
+					Issue->SetStringField(TEXT("kind"), TEXT("uv_type_mismatch"));
+					Issue->SetStringField(TEXT("expression"), Expr->GetName());
+					Issue->SetStringField(TEXT("input"), TEXT("Coordinates"));
+					Issue->SetStringField(TEXT("sourceClass"), SrcClass);
+					Issue->SetStringField(TEXT("message"), FString::Printf(
+						TEXT("TextureSample '%s' Coordinates wired from %s. The Coordinates pin expects a 2-channel UV. Use a TextureCoordinate node or extract the XY channels via ComponentMask."),
+						*Expr->GetName(), *SrcClass));
+					Issues.Add(MakeShared<FJsonValueObject>(Issue));
+				}
 			}
 		}
 	}

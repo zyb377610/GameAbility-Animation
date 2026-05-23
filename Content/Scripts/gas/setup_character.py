@@ -13,9 +13,11 @@ import ue
 
 @ue.uclass()
 class AttrSet_Base(ue.AttributeSet):
-    """基础属性集：血量、最大血量、攻击力、速度"""
+    """基础属性集：血量、法力、攻击力、速度"""
     Health = ue.uproperty(100.0)
     MaxHealth = ue.uproperty(100.0)
+    Mana = ue.uproperty(100.0)
+    MaxMana = ue.uproperty(100.0)
     AttackPower = ue.uproperty(10.0)
     MoveSpeed = ue.uproperty(600.0)
 
@@ -60,5 +62,9 @@ def init_gas_for_actor(actor: ue.Actor):
 
     if not attr_set:
         print("[GAS] 警告: 获取不到 AttributeSet")
+    else:
+        print(f"[GAS] Health={attr_set.Health}, MaxHealth={attr_set.MaxHealth}, "
+              f"Mana={attr_set.Mana}, MaxMana={attr_set.MaxMana}, "
+              f"AttackPower={attr_set.AttackPower}, MoveSpeed={attr_set.MoveSpeed}")
 
     return asc

@@ -19,6 +19,42 @@ namespace MCPJsonProperty
 	{
 		if (!Prop || !Value.IsValid() || !ValueAddr) { OutError = TEXT("null property/value/addr"); return false; }
 
+		// #420: explicit JSON null clears TObjectPtr<>/FSoftObjectPtr/FWeakObjectPtr/
+		// UClass*/FScriptInterface. The natural shape for clearing an AnimClass,
+		// Override Material, default Pawn class, etc. Previously the call fell through
+		// to ImportText and surfaced "asset not found: None".
+		if (Value->Type == EJson::Null)
+		{
+			if (FObjectProperty* OP = CastField<FObjectProperty>(Prop))
+			{
+				OP->SetObjectPropertyValue(ValueAddr, nullptr);
+				return true;
+			}
+			if (FSoftObjectProperty* SOP = CastField<FSoftObjectProperty>(Prop))
+			{
+				SOP->SetPropertyValue(ValueAddr, FSoftObjectPtr());
+				return true;
+			}
+			if (FWeakObjectProperty* WOP = CastField<FWeakObjectProperty>(Prop))
+			{
+				WOP->SetObjectPropertyValue(ValueAddr, nullptr);
+				return true;
+			}
+			if (FClassProperty* CP = CastField<FClassProperty>(Prop))
+			{
+				CP->SetObjectPropertyValue(ValueAddr, nullptr);
+				return true;
+			}
+			if (FInterfaceProperty* IP = CastField<FInterfaceProperty>(Prop))
+			{
+				FScriptInterface Empty;
+				IP->SetPropertyValue(ValueAddr, Empty);
+				return true;
+			}
+			OutError = FString::Printf(TEXT("property '%s' is not an object/class/interface reference; null value not allowed"), *Prop->GetName());
+			return false;
+		}
+
 		// TArray
 		if (FArrayProperty* ArrProp = CastField<FArrayProperty>(Prop))
 		{
@@ -112,6 +148,77 @@ namespace MCPJsonProperty
 				FSoftObjectPtr Ptr(PathObj);
 				SoftObjProp->SetPropertyValue(ValueAddr, Ptr);
 				return true;
+			}
+		}
+
+		// Enum / Byte-with-enum: accept friendly aliases ("center", "Center"),
+		// short names ("HAlign_Center"), and full prefixed names
+		// ("EHorizontalAlignment::HAlign_Center"). Numeric values still go
+		// through ImportText. (#287)
+		auto TryResolveEnumValue = [](UEnum* Enum, const FString& InStr, int64& OutValue) -> bool
+		{
+			if (!Enum) return false;
+			// 1. Direct: full or short name as written.
+			int64 V = Enum->GetValueByNameString(InStr);
+			if (V != INDEX_NONE) { OutValue = V; return true; }
+			// 2. With type-prefix joined by ::.
+			FString Prefixed = FString::Printf(TEXT("%s::%s"), *Enum->GetName(), *InStr);
+			V = Enum->GetValueByNameString(Prefixed);
+			if (V != INDEX_NONE) { OutValue = V; return true; }
+			// 3. Friendly fallback — match each enumerator's display name and
+			//    short-form name case-insensitively. Walks all enumerators so
+			//    "center" matches HAlign_Center, "left" matches HAlign_Left,
+			//    "EHTA_Center" matches itself, etc.
+			const FString InLower = InStr.ToLower();
+			for (int32 i = 0; i < Enum->NumEnums() - 1; i++)
+			{
+				const FName EntryName = Enum->GetNameByIndex(i);
+				FString Short = Enum->GetNameStringByIndex(i);
+				if (Short.ToLower() == InLower) { OutValue = Enum->GetValueByIndex(i); return true; }
+				// Strip prefix up to last '_' and compare ("HAlign_Center" -> "Center").
+				int32 UnderscorePos = INDEX_NONE;
+				if (Short.FindLastChar(TEXT('_'), UnderscorePos))
+				{
+					FString Tail = Short.Mid(UnderscorePos + 1);
+					if (Tail.ToLower() == InLower) { OutValue = Enum->GetValueByIndex(i); return true; }
+				}
+				const FText DisplayName = Enum->GetDisplayNameTextByIndex(i);
+				if (DisplayName.ToString().ToLower() == InLower) { OutValue = Enum->GetValueByIndex(i); return true; }
+			}
+			return false;
+		};
+
+		if (FEnumProperty* EnumProp = CastField<FEnumProperty>(Prop))
+		{
+			FString Str;
+			if (Value->TryGetString(Str) && !Str.IsEmpty())
+			{
+				int64 EnumVal;
+				if (TryResolveEnumValue(EnumProp->GetEnum(), Str, EnumVal))
+				{
+					EnumProp->GetUnderlyingProperty()->SetIntPropertyValue(ValueAddr, EnumVal);
+					return true;
+				}
+				OutError = FString::Printf(TEXT("unknown enum value '%s' for %s"), *Str, *EnumProp->GetEnum()->GetName());
+				return false;
+			}
+		}
+		if (FByteProperty* ByteProp = CastField<FByteProperty>(Prop))
+		{
+			FString Str;
+			if (Value->TryGetString(Str) && !Str.IsEmpty())
+			{
+				if (UEnum* Enum = ByteProp->Enum)
+				{
+					int64 EnumVal;
+					if (TryResolveEnumValue(Enum, Str, EnumVal))
+					{
+						ByteProp->SetPropertyValue(ValueAddr, (uint8)EnumVal);
+						return true;
+					}
+					OutError = FString::Printf(TEXT("unknown enum value '%s' for %s"), *Str, *Enum->GetName());
+					return false;
+				}
 			}
 		}
 

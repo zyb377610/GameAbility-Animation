@@ -14,10 +14,7 @@
 void FPhysicsHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 {
 	Registry.RegisterHandler(TEXT("set_collision_profile"), &SetCollisionProfile);
-	Registry.RegisterHandler(TEXT("set_physics_enabled"), &SetPhysicsEnabled);
 	Registry.RegisterHandler(TEXT("set_collision_enabled"), &SetCollisionEnabled);
-	Registry.RegisterHandler(TEXT("set_body_properties"), &SetBodyProperties);
-	// Aliases
 	Registry.RegisterHandler(TEXT("set_simulate_physics"), &SetPhysicsEnabled);
 	Registry.RegisterHandler(TEXT("set_physics_properties"), &SetBodyProperties);
 }
@@ -32,17 +29,7 @@ TSharedPtr<FJsonValue> FPhysicsHandlers::SetCollisionProfile(const TSharedPtr<FJ
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	// Find actor by label
-	AActor* Actor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			Actor = *ActorIt;
-			break;
-		}
-	}
-
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
 	if (!Actor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
@@ -113,17 +100,7 @@ TSharedPtr<FJsonValue> FPhysicsHandlers::SetPhysicsEnabled(const TSharedPtr<FJso
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	// Find actor by label
-	AActor* Actor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			Actor = *ActorIt;
-			break;
-		}
-	}
-
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
 	if (!Actor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
@@ -215,17 +192,7 @@ TSharedPtr<FJsonValue> FPhysicsHandlers::SetCollisionEnabled(const TSharedPtr<FJ
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	// Find actor by label
-	AActor* Actor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			Actor = *ActorIt;
-			break;
-		}
-	}
-
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
 	if (!Actor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
@@ -300,17 +267,7 @@ TSharedPtr<FJsonValue> FPhysicsHandlers::SetBodyProperties(const TSharedPtr<FJso
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	// Find actor by label
-	AActor* Actor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			Actor = *ActorIt;
-			break;
-		}
-	}
-
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
 	if (!Actor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));

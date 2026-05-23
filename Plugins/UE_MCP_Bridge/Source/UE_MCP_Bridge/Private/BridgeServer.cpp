@@ -30,6 +30,7 @@
 #include "Handlers/SplineHandlers.h"
 #include "Handlers/PhysicsHandlers.h"
 #include "Handlers/DemoHandlers.h"
+#include "Handlers/StateTreeHandlers.h"
 
 // Platform-specific socket includes
 #if PLATFORM_WINDOWS
@@ -85,6 +86,7 @@ FMCPBridgeServer::FMCPBridgeServer(int32 Port)
 	FPhysicsHandlers::RegisterHandlers(HandlerRegistry);
 	FDemoHandlers::RegisterHandlers(HandlerRegistry);
 	FProjectHandlers::RegisterHandlers(HandlerRegistry);
+	FStateTreeHandlers::RegisterHandlers(HandlerRegistry);
 }
 
 FMCPBridgeServer::~FMCPBridgeServer()
@@ -167,11 +169,13 @@ uint32 FMCPBridgeServer::Run()
 	int32 NoDelay = 1;
 	setsockopt(ServerSocketFD, IPPROTO_TCP, TCP_NODELAY, (char*)&NoDelay, sizeof(NoDelay));
 
-	// Bind socket
+	// Bind socket to loopback only. The bridge has no authentication on the
+	// WebSocket upgrade, so binding to 0.0.0.0 (INADDR_ANY) would expose every
+	// editor-side handler (including execute_python) to any client on the LAN.
 	sockaddr_in ServerAddr;
 	FMemory::Memset(&ServerAddr, 0, sizeof(ServerAddr));
 	ServerAddr.sin_family = AF_INET;
-	ServerAddr.sin_addr.s_addr = INADDR_ANY;
+	ServerAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	ServerAddr.sin_port = htons(ServerPort);
 
 	if (bind(ServerSocketFD, (sockaddr*)&ServerAddr, sizeof(ServerAddr)) < 0)
@@ -205,7 +209,7 @@ uint32 FMCPBridgeServer::Run()
 		return 1;
 	}
 
-	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Bridge listening on ws://localhost:%d"), ServerPort);
+	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Bridge listening on ws://127.0.0.1:%d (loopback only)"), ServerPort);
 	bIsRunning = true;
 
 	// Accept connections
@@ -382,7 +386,31 @@ FString FMCPBridgeServer::ProcessMessage(const FString& Message)
 	}
 	else
 	{
-		return CreateJsonRpcError(Request, -32601, FString::Printf(TEXT("Unknown method: %s"), *Method));
+		// #233: a stale plugin build can dispatch a method that the TS schema
+		// advertises but the C++ side hasn't registered yet. The bare
+		// "Unknown method" error gave callers no way to tell that apart from
+		// a typo. List a few near-matches so it's obvious when the deployed
+		// plugin is behind the schema.
+		FString Detail = FString::Printf(TEXT("Unknown method: %s"), *Method);
+		const TArray<FString> All = HandlerRegistry.GetHandlerNames();
+		TArray<FString> Hints;
+		for (const FString& Name : All)
+		{
+			if (Name.Contains(Method, ESearchCase::IgnoreCase) || Method.Contains(Name, ESearchCase::IgnoreCase))
+			{
+				Hints.Add(Name);
+				if (Hints.Num() >= 5) break;
+			}
+		}
+		if (Hints.Num() == 0 && !All.IsEmpty())
+		{
+			Detail += FString::Printf(TEXT(" (no near-matches in %d registered handlers - the deployed plugin may be behind the TS schema; try a clean rebuild + redeploy)."), All.Num());
+		}
+		else if (Hints.Num() > 0)
+		{
+			Detail += FString::Printf(TEXT(" (did you mean: %s)"), *FString::Join(Hints, TEXT(", ")));
+		}
+		return CreateJsonRpcError(Request, -32601, Detail);
 	}
 }
 
@@ -463,6 +491,41 @@ FString FMCPBridgeServer::PerformWebSocketHandshake(int32 ClientSocketFD)
 	if (Request.IsEmpty())
 	{
 		return TEXT("");
+	}
+
+	// Reject browser-originated upgrades from any origin other than loopback.
+	// Browsers always send an Origin header on WebSocket upgrades, so a present
+	// Origin that isn't loopback is a cross-site websocket hijacking attempt
+	// (a malicious page on the developer's machine reaching the editor bridge).
+	// Native clients (Node ws, curl) omit Origin and are allowed.
+	{
+		int32 OriginStart = Request.Find(TEXT("Origin:"), ESearchCase::IgnoreCase);
+		if (OriginStart != INDEX_NONE)
+		{
+			int32 ValueStart = OriginStart + 7; // strlen("Origin:")
+			while (ValueStart < Request.Len() && (Request[ValueStart] == TEXT(' ') || Request[ValueStart] == TEXT('\t')))
+			{
+				ValueStart++;
+			}
+			int32 ValueEnd = Request.Find(TEXT("\r\n"), ESearchCase::CaseSensitive, ESearchDir::FromStart, ValueStart);
+			FString Origin = (ValueEnd == INDEX_NONE)
+				? Request.Mid(ValueStart).TrimStartAndEnd()
+				: Request.Mid(ValueStart, ValueEnd - ValueStart).TrimStartAndEnd();
+
+			const bool bIsLoopback =
+				Origin.StartsWith(TEXT("http://localhost"), ESearchCase::IgnoreCase) ||
+				Origin.StartsWith(TEXT("https://localhost"), ESearchCase::IgnoreCase) ||
+				Origin.StartsWith(TEXT("http://127.0.0.1"), ESearchCase::IgnoreCase) ||
+				Origin.StartsWith(TEXT("https://127.0.0.1"), ESearchCase::IgnoreCase) ||
+				Origin.StartsWith(TEXT("http://[::1]"), ESearchCase::IgnoreCase) ||
+				Origin.StartsWith(TEXT("https://[::1]"), ESearchCase::IgnoreCase);
+
+			if (!bIsLoopback)
+			{
+				UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Rejected WebSocket upgrade from Origin: %s"), *Origin);
+				return TEXT("");
+			}
+		}
 	}
 
 	// Extract WebSocket-Key from request (case-insensitive search)

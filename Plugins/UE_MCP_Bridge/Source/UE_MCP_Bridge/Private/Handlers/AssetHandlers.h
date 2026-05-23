@@ -24,11 +24,11 @@ private:
 	static TSharedPtr<FJsonValue> BulkRename(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateDataAsset(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SaveAsset(const TSharedPtr<FJsonObject>& Params);
+	// #429: bulk save of every dirty package - one-shot end-of-workflow flush.
+	static TSharedPtr<FJsonValue> SaveAllDirty(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListTextures(const TSharedPtr<FJsonObject>& Params);
 
 	// DataTable handlers
-	static TSharedPtr<FJsonValue> ImportDataTableJson(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> ExportDataTableJson(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateDataTable(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadDataTable(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReimportDataTable(const TSharedPtr<FJsonObject>& Params);
@@ -48,6 +48,8 @@ private:
 	static TSharedPtr<FJsonValue> ListTextureProperties(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetTextureProperties(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ImportTexture(const TSharedPtr<FJsonObject>& Params);
+	// #430: one-call batch of texture imports - loops AssetImportTasks inside the editor.
+	static TSharedPtr<FJsonValue> ImportTextureBatch(const TSharedPtr<FJsonObject>& Params);
 
 	// Export
 	static TSharedPtr<FJsonValue> ExportAsset(const TSharedPtr<FJsonObject>& Params);
@@ -59,6 +61,16 @@ private:
 	static TSharedPtr<FJsonValue> AddSocket(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RemoveSocket(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListSockets(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetSocketTransform(const TSharedPtr<FJsonObject>& Params);
+
+	// #420: nested-path UPROPERTY setter for any asset (materials, datatables,
+	// data assets, etc.) so callers don't read-modify-write struct copies.
+	static TSharedPtr<FJsonValue> SetAssetProperty(const TSharedPtr<FJsonObject>& Params);
+	// #421: batch texture settings by canonical type (Normal/Grayscale/BaseColor/HDR).
+	static TSharedPtr<FJsonValue> SetTextureSettingsByType(const TSharedPtr<FJsonObject>& Params);
+	// #421: one-call factory for an Interchange pipeline asset with the
+	// 15-property mesh-import boilerplate already configured.
+	static TSharedPtr<FJsonValue> CreateInterchangePipeline(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReloadPackage(const TSharedPtr<FJsonObject>& Params);
 
 	// v0.7.8 — FTS5-backed asset search (stubs)
@@ -74,7 +86,19 @@ private:
 
 	// v1.0.0-rc.3 — #177, #192, #193
 	static TSharedPtr<FJsonValue> GetMeshBounds(const TSharedPtr<FJsonObject>& Params);
+	// #431: one-call mesh QA - bounds + materials + LOD/vertex/skeleton.
+	static TSharedPtr<FJsonValue> GetMeshInfo(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetMeshCollision(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> MoveFolder(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetMeshNav(const TSharedPtr<FJsonObject>& Params);
+	// #212: create empty content browser folders
+	static TSharedPtr<FJsonValue> CreateFolder(const TSharedPtr<FJsonObject>& Params);
+	// Delete content browser folder(s) - empty by default; force=true also removes contained assets.
+	static TSharedPtr<FJsonValue> DeleteFolder(const TSharedPtr<FJsonObject>& Params);
+	// #270: read AssetImportData source filenames from imported assets
+	static TSharedPtr<FJsonValue> ReadImportSources(const TSharedPtr<FJsonObject>& Params);
+
+	// #279: detect stuck-unloadable assets and recover without editor restart
+	static TSharedPtr<FJsonValue> HealthCheck(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ForceReload(const TSharedPtr<FJsonObject>& Params);
 };

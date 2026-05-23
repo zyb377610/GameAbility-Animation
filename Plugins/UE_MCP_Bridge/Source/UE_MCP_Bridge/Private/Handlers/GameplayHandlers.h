@@ -29,25 +29,28 @@ private:
 	static TSharedPtr<FJsonValue> CreatePlayerController(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreatePlayerState(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateHud(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> SetCollisionProfile(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> SetPhysicsEnabled(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> SetCollisionType(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> SetBodyProperties(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SpawnNavModifierVolume(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RebuildNavmesh(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> GetCdoDefaults(const TSharedPtr<FJsonObject>& Params);
+	// #424: synchronous path query + invoker enumeration.
+	static TSharedPtr<FJsonValue> FindNavPath(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ListNavInvokers(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetWorldGameMode(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> CreateAiPerceptionConfig(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddBlackboardKey(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> SetupEnhancedInput(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> ConfigureBehaviorTree(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> SetupPathFollowing(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> RunEqsQuery(const TSharedPtr<FJsonObject>& Params);
+	// #250: rebind a BehaviorTree asset's BlackboardAsset (the C++ field is
+	// protected, so reflection is the only way to write it cleanly).
+	static TSharedPtr<FJsonValue> SetBehaviorTreeBlackboard(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetBehaviorTreeInfo(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddPerceptionComponent(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ConfigureAiPerceptionSense(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddStateTreeComponent(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddSmartObjectComponent(const TSharedPtr<FJsonObject>& Params);
+	// #416: slot authoring on USmartObjectDefinition via UPROPERTY reflection
+	// (no Build.cs dependency on SmartObjectsModule).
+	static TSharedPtr<FJsonValue> AddSmartObjectSlot(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetSmartObjectSlot(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> RemoveSmartObjectSlot(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ListSmartObjectSlots(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddSmartObjectSlotBehavior(const TSharedPtr<FJsonObject>& Params);
 
 	// IMC read/write (#57 / #60 / #75 / #158)
 	static TSharedPtr<FJsonValue> ReadImc(const TSharedPtr<FJsonObject>& Params);
@@ -78,4 +81,33 @@ private:
 
 	// #186 — apply damage to PIE actor
 	static TSharedPtr<FJsonValue> ApplyDamageInPie(const TSharedPtr<FJsonObject>& Params);
+
+	// PIE input injection (inject_input + continuous + tape).
+	static TSharedPtr<FJsonValue> InjectInput(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> InjectInputStart(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> InjectInputUpdate(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> InjectInputStop(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> InjectInputTape(const TSharedPtr<FJsonObject>& Params);
+
+	// PIE record (arm/disarm/stop/status/list/read/delete/mark).
+	static TSharedPtr<FJsonValue> PieRecordArm(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieRecordDisarm(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieRecordStop(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieRecordStatus(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieRecordList(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieRecordRead(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieRecordDelete(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieMark(const TSharedPtr<FJsonObject>& Params);
+
+	// PIE replay (arm/disarm/stop/status).
+	static TSharedPtr<FJsonValue> PieReplayArm(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieReplayDisarm(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieReplayStop(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> PieReplayStatus(const TSharedPtr<FJsonObject>& Params);
+
+	// Offline pawn-state diff of two recordings.
+	static TSharedPtr<FJsonValue> PieRecordDiff(const TSharedPtr<FJsonObject>& Params);
+
+	// Full UProperty dump of a live PIE actor to JSON (snapshots/<name>.json).
+	static TSharedPtr<FJsonValue> PieSnapshot(const TSharedPtr<FJsonObject>& Params);
 };

@@ -28,6 +28,8 @@
 #include "Factories/BlueprintFactory.h"
 #include "EdGraph/EdGraph.h"
 #include "K2Node_CallFunction.h"
+#include "AnimStateTransitionNode.h"
+#include "AnimStateNodeBase.h"
 #include "K2Node_Event.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_EditablePinBase.h"
@@ -83,13 +85,12 @@ void FBlueprintHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("rename_function"), &RenameFunction);
 	Registry.RegisterHandler(TEXT("delete_function"), &DeleteFunction);
 	Registry.RegisterHandler(TEXT("create_blueprint_interface"), &CreateBlueprintInterface);
-	Registry.RegisterHandler(TEXT("list_node_types_detailed"), &ListNodeTypesDetailed);
-	Registry.RegisterHandler(TEXT("search_callable_functions"), &SearchCallableFunctions);
 	Registry.RegisterHandler(TEXT("connect_pins"), &ConnectPins);
 	Registry.RegisterHandler(TEXT("delete_node"), &DeleteNode);
 	Registry.RegisterHandler(TEXT("set_node_property"), &SetNodeProperty);
 	Registry.RegisterHandler(TEXT("list_blueprint_graphs"), &ListGraphs);
 	Registry.RegisterHandler(TEXT("set_blueprint_component_property"), &SetComponentProperty);
+	Registry.RegisterHandler(TEXT("set_capsule_size"), &SetCapsuleSize);
 	Registry.RegisterHandler(TEXT("set_class_default"), &SetClassDefault);
 	Registry.RegisterHandler(TEXT("remove_component"), &RemoveComponent);
 	Registry.RegisterHandler(TEXT("delete_variable"), &DeleteVariable);
@@ -127,6 +128,13 @@ void FBlueprintHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 
 	// issue #195: run construction script and inspect resulting components
 	Registry.RegisterHandler(TEXT("run_construction_script"), &RunConstructionScript);
+
+	// v1.0.0-rc.15 — agent-friendly BP authoring
+	Registry.RegisterHandler(TEXT("compile_blueprints"), &CompileBlueprints);
+	Registry.RegisterHandler(TEXT("cleanup_graph"), &CleanupGraph);
+	Registry.RegisterHandler(TEXT("connect_pins_batch"), &ConnectPinsBatch);
+	Registry.RegisterHandler(TEXT("set_node_position"), &SetNodePosition);
+	Registry.RegisterHandler(TEXT("auto_layout_graph"), &AutoLayoutGraph);
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +190,24 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReadBlueprintGraphSummary(const TShar
 	TSharedPtr<FJsonObject> Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
 	Result->SetStringField(TEXT("graphName"), GraphName);
+	// #298: identify graph type so callers can tell ubergraph / construction
+	// script / function / macro apart without having to grep node titles.
+	{
+		FString GraphType = TEXT("Other");
+		if (Blueprint->UbergraphPages.Contains(Graph)) GraphType = TEXT("Ubergraph");
+		for (UEdGraph* G : Blueprint->FunctionGraphs)
+		{
+			if (G == Graph) { GraphType = (G->GetFName() == UEdGraphSchema_K2::FN_UserConstructionScript) ? TEXT("ConstructionScript") : TEXT("Function"); break; }
+		}
+		for (UEdGraph* G : Blueprint->MacroGraphs)        { if (G == Graph) { GraphType = TEXT("Macro"); break; } }
+		for (UEdGraph* G : Blueprint->DelegateSignatureGraphs) { if (G == Graph) { GraphType = TEXT("DelegateSignature"); break; } }
+		for (UEdGraph* G : Blueprint->IntermediateGeneratedGraphs) { if (G == Graph) { GraphType = TEXT("Intermediate"); break; } }
+		if (Graph && Graph->Schema)
+		{
+			Result->SetStringField(TEXT("schemaClass"), Graph->Schema->GetName());
+		}
+		Result->SetStringField(TEXT("graphType"), GraphType);
+	}
 	Result->SetArrayField(TEXT("nodes"), Nodes);
 	Result->SetArrayField(TEXT("execEdges"), ExecEdges);
 	Result->SetArrayField(TEXT("dataEdges"), DataEdges);
@@ -378,20 +404,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::GetBlueprintDependencies(const TShare
 
 UBlueprint* FBlueprintHandlers::LoadBlueprint(const FString& AssetPath)
 {
-	// Try exact path first (handles both package path and full object path)
-	UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *AssetPath);
-	if (BP) return BP;
-
-	// If the path looks like a package path (no '.' after last '/'), try object path format
-	// e.g. "/Game/Foo/BP_Bar" -> "/Game/Foo/BP_Bar.BP_Bar"
-	if (!AssetPath.Contains(TEXT(".")))
-	{
-		FString AssetName;
-		AssetPath.Split(TEXT("/"), nullptr, &AssetName, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
-		FString ObjectPath = AssetPath + TEXT(".") + AssetName;
-		BP = LoadObject<UBlueprint>(nullptr, *ObjectPath);
-	}
-	return BP;
+	return LoadAssetByPath<UBlueprint>(AssetPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -562,8 +575,84 @@ FEdGraphPinType FBlueprintHandlers::MakePinType(const FString& TypeStr)
 	{
 		PinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
 	}
+	// (#428) Explicit enum reference: "enum:/Game/Path/E_Foo[.E_Foo]" or
+	// "enum:/Script/Module.EEnumName". Used for user-defined enums where the
+	// short-name resolver can't reach them.
+	else if (TypeStr.StartsWith(TEXT("enum:")))
+	{
+		FString EnumPath = TypeStr.Mid(5);
+		EnumPath.TrimStartAndEndInline();
+		UEnum* Enum = LoadObject<UEnum>(nullptr, *EnumPath);
+		if (!Enum && !EnumPath.Contains(TEXT(".")))
+		{
+			// Try object-path form ("/Game/Foo/Bar" -> "/Game/Foo/Bar.Bar")
+			FString AssetName;
+			EnumPath.Split(TEXT("/"), nullptr, &AssetName, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+			Enum = LoadObject<UEnum>(nullptr, *(EnumPath + TEXT(".") + AssetName));
+		}
+		if (Enum)
+		{
+			PinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
+			PinType.PinSubCategoryObject = Enum;
+		}
+	}
+	// (#286) Resolve named enums by full path (/Script/Module.EEnumName) or
+	// short name (EMyEnum / E_MyEnum). UE pin types for enums use PC_Byte with
+	// PinSubCategoryObject = UEnum*.
+	else if (TypeStr.StartsWith(TEXT("/Script/")) && TypeStr.Contains(TEXT(".")))
+	{
+		if (UEnum* Enum = LoadObject<UEnum>(nullptr, *TypeStr))
+		{
+			PinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
+			PinType.PinSubCategoryObject = Enum;
+		}
+		// fall through to default-handling below if it's not actually an enum;
+		// LoadObject returning nullptr leaves PinCategory NAME_None which the
+		// next branch can still try as a struct or class.
+		else if (TryResolveObjectPin(TypeStr))
+		{
+			// resolved as object/class
+		}
+	}
+	// (#428) Bare /Game/... path - assume user-defined enum.
+	else if (TypeStr.StartsWith(TEXT("/Game/")))
+	{
+		FString EnumPath = TypeStr;
+		UEnum* Enum = LoadObject<UEnum>(nullptr, *EnumPath);
+		if (!Enum && !EnumPath.Contains(TEXT(".")))
+		{
+			FString AssetName;
+			EnumPath.Split(TEXT("/"), nullptr, &AssetName, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+			Enum = LoadObject<UEnum>(nullptr, *(EnumPath + TEXT(".") + AssetName));
+		}
+		if (Enum)
+		{
+			PinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
+			PinType.PinSubCategoryObject = Enum;
+		}
+	}
 	else
 	{
+		// Try short-name enum lookup before the struct resolver — many engine
+		// enums (EAttachmentRule, EMovementMode) match the convention E* but
+		// would otherwise fall through and return an empty PinType. (#286)
+		auto TryResolveEnumShort = [&](const FString& Name) -> UEnum*
+		{
+			if (Name.Len() < 2) return nullptr;
+			if (Name[0] != 'E') return nullptr;
+			for (TObjectIterator<UEnum> It; It; ++It)
+			{
+				if (It->GetName() == Name) return *It;
+			}
+			return nullptr;
+		};
+		if (UEnum* ShortEnum = TryResolveEnumShort(TypeStr))
+		{
+			PinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
+			PinType.PinSubCategoryObject = ShortEnum;
+			return PinType;
+		}
+
 		// Try to resolve as a struct type (FVector, FRotator, FTransform, FLinearColor, FGameplayTag, etc.)
 		// Strip leading 'F' for lookup if present
 		FString StructName = TypeStr;
@@ -636,6 +725,42 @@ UEdGraph* FBlueprintHandlers::FindGraph(UBlueprint* Blueprint, const FString& Gr
 	// Search ALL graphs (UbergraphPages, FunctionGraphs, AnimGraphs, etc.)
 	TArray<UEdGraph*> AllGraphs;
 	Blueprint->GetAllGraphs(AllGraphs);
+
+	// #209: state-pair addressing "Idle to Resting" / "Idle->Resting" for
+	// AnimBP transition condition graphs. The internal graph name is always
+	// "Transition" so callers couldn't target a specific transition by name.
+	auto SplitStatePair = [](const FString& In, FString& OutFrom, FString& OutTo) -> bool
+	{
+		const TCHAR* Seps[] = { TEXT(" to "), TEXT("->"), TEXT("→"), TEXT(" -> ") };
+		for (const TCHAR* Sep : Seps)
+		{
+			int32 At = In.Find(Sep);
+			if (At != INDEX_NONE)
+			{
+				OutFrom = In.Left(At).TrimStartAndEnd();
+				OutTo = In.Mid(At + FCString::Strlen(Sep)).TrimStartAndEnd();
+				return !OutFrom.IsEmpty() && !OutTo.IsEmpty();
+			}
+		}
+		return false;
+	};
+	FString FromState, ToState;
+	if (SplitStatePair(GraphName, FromState, ToState))
+	{
+		for (UEdGraph* Graph : AllGraphs)
+		{
+			if (!Graph) continue;
+			if (UAnimStateTransitionNode* Trans = Cast<UAnimStateTransitionNode>(Graph->GetOuter()))
+			{
+				const FString PrevName = Trans->GetPreviousState() ? Trans->GetPreviousState()->GetStateName() : FString();
+				const FString NextName = Trans->GetNextState() ? Trans->GetNextState()->GetStateName() : FString();
+				if (PrevName.Equals(FromState, ESearchCase::IgnoreCase) && NextName.Equals(ToState, ESearchCase::IgnoreCase))
+				{
+					return Graph;
+				}
+			}
+		}
+	}
 
 	// #119: support indexed addressing "Transition[4]" for disambiguating the N'th graph
 	// with that name (AnimBP state-machine transition graphs all share name "Transition")
@@ -800,6 +925,32 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReadBlueprint(const TSharedPtr<FJsonO
 		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
 	}
 
+	// #353/#370: per-component property dump on demand. Off by default so the
+	// common read stays small; flip on when the caller wants the full UPROPERTY
+	// values from each component template (e.g. AIPerceptionStimuliSourceComponent's
+	// bAutoRegisterAsSource for a read-then-modify flow).
+	const bool bIncludeComponentProperties = OptionalBool(Params, TEXT("includeComponentProperties"));
+	auto AppendComponentProperties = [&bIncludeComponentProperties](TSharedPtr<FJsonObject> CompObj, UActorComponent* Template)
+	{
+		if (!bIncludeComponentProperties || !Template) return;
+		TArray<TSharedPtr<FJsonValue>> Props;
+		for (TFieldIterator<FProperty> PIt(Template->GetClass()); PIt; ++PIt)
+		{
+			FProperty* Prop = *PIt;
+			if (!Prop) continue;
+			if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient)) continue;
+			TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("name"), Prop->GetName());
+			P->SetStringField(TEXT("type"), Prop->GetCPPType());
+			FString ValueStr;
+			const void* VP = Prop->ContainerPtrToValuePtr<void>(Template);
+			Prop->ExportText_Direct(ValueStr, VP, VP, Template, PPF_None);
+			P->SetStringField(TEXT("value"), ValueStr);
+			Props.Add(MakeShared<FJsonValueObject>(P));
+		}
+		CompObj->SetArrayField(TEXT("properties"), Props);
+	};
+
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
 	Result->SetStringField(TEXT("className"), Blueprint->GetName());
@@ -911,7 +1062,41 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReadBlueprint(const TSharedPtr<FJsonO
 				}
 			}
 
+			AppendComponentProperties(CompObj, Template);
 			ComponentsArray.Add(MakeShared<FJsonValueObject>(CompObj));
+		}
+	}
+
+	// #353: inherited native components (e.g. CharacterMesh0, CharMoveComp on
+	// ACharacter) live on the parent class' CDO, not in the BP's SCS. Walk the
+	// generated class' default subobjects so the response covers the full
+	// effective component list, not just the BP-authored slice.
+	if (UClass* GenClass = Blueprint->GeneratedClass)
+	{
+		if (AActor* CDOActor = Cast<AActor>(GenClass->GetDefaultObject()))
+		{
+			TArray<UActorComponent*> AllComps;
+			CDOActor->GetComponents(AllComps);
+			for (UActorComponent* Comp : AllComps)
+			{
+				if (!Comp) continue;
+				// Skip components that came from the SCS (already emitted above).
+				if (Comp->CreationMethod == EComponentCreationMethod::SimpleConstructionScript) continue;
+				TSharedPtr<FJsonObject> CompObj = MakeShared<FJsonObject>();
+				CompObj->SetStringField(TEXT("name"), Comp->GetName());
+				CompObj->SetStringField(TEXT("class"), Comp->GetClass()->GetName());
+				CompObj->SetStringField(TEXT("origin"), TEXT("native"));
+				if (USceneComponent* SC = Cast<USceneComponent>(Comp))
+				{
+					TSharedPtr<FJsonObject> Loc = MakeShared<FJsonObject>();
+					Loc->SetNumberField(TEXT("x"), SC->GetRelativeLocation().X);
+					Loc->SetNumberField(TEXT("y"), SC->GetRelativeLocation().Y);
+					Loc->SetNumberField(TEXT("z"), SC->GetRelativeLocation().Z);
+					CompObj->SetObjectField(TEXT("relativeLocation"), Loc);
+				}
+				AppendComponentProperties(CompObj, Comp);
+				ComponentsArray.Add(MakeShared<FJsonValueObject>(CompObj));
+			}
 		}
 	}
 	Result->SetArrayField(TEXT("components"), ComponentsArray);
@@ -1137,56 +1322,6 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddComponent(const TSharedPtr<FJsonOb
 		return MCPError(TEXT("Failed to add component via SubobjectDataSubsystem"));
 	}
 }
-
-TSharedPtr<FJsonValue> FBlueprintHandlers::AddBlueprintInterface(const TSharedPtr<FJsonObject>& Params)
-{
-	FString BlueprintPath;
-	if (auto Err = RequireString(Params, TEXT("blueprintPath"), BlueprintPath)) return Err;
-
-	FString InterfacePathStr;
-	if (auto Err = RequireString(Params, TEXT("interfacePath"), InterfacePathStr)) return Err;
-
-	UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
-	if (!Blueprint)
-	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
-	}
-
-	UClass* InterfaceClass = LoadObject<UClass>(nullptr, *InterfacePathStr);
-	if (!InterfaceClass)
-	{
-		return MCPError(FString::Printf(TEXT("Interface not found: %s"), *InterfacePathStr));
-	}
-
-	// Idempotency: check if interface already implemented on this blueprint
-	FTopLevelAssetPath InterfaceAssetPath(InterfaceClass->GetPathName());
-	for (const FBPInterfaceDescription& Impl : Blueprint->ImplementedInterfaces)
-	{
-		if (Impl.Interface == InterfaceClass)
-		{
-			auto Existed = MCPSuccess();
-			MCPSetExisted(Existed);
-			Existed->SetStringField(TEXT("blueprintPath"), BlueprintPath);
-			Existed->SetStringField(TEXT("interfacePath"), InterfacePathStr);
-			return MCPResult(Existed);
-		}
-	}
-
-	// Use FBlueprintEditorUtils to add interface
-	FBlueprintEditorUtils::ImplementNewInterface(Blueprint, InterfaceAssetPath);
-
-	FKismetEditorUtilities::CompileBlueprint(Blueprint);
-	// Save asset
-	SaveAssetPackage(Blueprint);
-
-	auto Result = MCPSuccess();
-	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("blueprintPath"), BlueprintPath);
-	Result->SetStringField(TEXT("interfacePath"), InterfacePathStr);
-	// No rollback: no paired remove_blueprint_interface handler yet.
-	return MCPResult(Result);
-}
-
 TSharedPtr<FJsonValue> FBlueprintHandlers::CompileBlueprint(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
@@ -1385,563 +1520,6 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListBlueprintVariables(const TSharedP
 	Result->SetStringField(TEXT("path"), AssetPath);
 	Result->SetArrayField(TEXT("variables"), Variables);
 	Result->SetNumberField(TEXT("count"), Variables.Num());
-	return MCPResult(Result);
-}
-TSharedPtr<FJsonValue> FBlueprintHandlers::CreateFunction(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
-
-	FString FunctionName;
-	if (auto Err = RequireString(Params, TEXT("functionName"), FunctionName)) return Err;
-
-	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
-
-	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint)
-	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
-	}
-
-	// Idempotency: existing function graph short-circuits.
-	for (UEdGraph* G : Blueprint->FunctionGraphs)
-	{
-		if (G && G->GetName() == FunctionName)
-		{
-			if (OnConflict == TEXT("error"))
-			{
-				return MCPError(FString::Printf(TEXT("Function '%s' already exists"), *FunctionName));
-			}
-			auto Existing = MCPSuccess();
-			MCPSetExisted(Existing);
-			Existing->SetStringField(TEXT("path"), AssetPath);
-			Existing->SetStringField(TEXT("functionName"), FunctionName);
-			return MCPResult(Existing);
-		}
-	}
-
-	UEdGraph* NewGraph = FBlueprintEditorUtils::CreateNewGraph(
-		Blueprint,
-		FName(*FunctionName),
-		UEdGraph::StaticClass(),
-		UEdGraphSchema_K2::StaticClass()
-	);
-	if (!NewGraph)
-	{
-		return MCPError(FString::Printf(TEXT("Failed to create function: %s"), *FunctionName));
-	}
-
-	FBlueprintEditorUtils::AddFunctionGraph<UClass>(Blueprint, NewGraph, /*bIsUserCreated=*/true, /*SignatureFromObject=*/nullptr);
-
-	FKismetEditorUtilities::CompileBlueprint(Blueprint);
-	SaveAssetPackage(Blueprint);
-
-	auto Result = MCPSuccess();
-	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), AssetPath);
-	Result->SetStringField(TEXT("functionName"), FunctionName);
-
-	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("path"), AssetPath);
-	Payload->SetStringField(TEXT("functionName"), FunctionName);
-	MCPSetRollback(Result, TEXT("delete_function"), Payload);
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FBlueprintHandlers::ListBlueprintFunctions(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
-
-	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint)
-	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
-	}
-
-	TArray<TSharedPtr<FJsonValue>> Functions;
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-	{
-		if (!Graph) continue;
-		TSharedPtr<FJsonObject> FuncObj = MakeShared<FJsonObject>();
-		FuncObj->SetStringField(TEXT("name"), Graph->GetName());
-		FuncObj->SetNumberField(TEXT("nodeCount"), Graph->Nodes.Num());
-		Functions.Add(MakeShared<FJsonValueObject>(FuncObj));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("path"), AssetPath);
-	Result->SetArrayField(TEXT("functions"), Functions);
-	Result->SetNumberField(TEXT("count"), Functions.Num());
-	return MCPResult(Result);
-}
-TSharedPtr<FJsonValue> FBlueprintHandlers::AddEventDispatcher(const TSharedPtr<FJsonObject>& Params)
-{
-	FString BlueprintPath;
-	if (auto Err = RequireString(Params, TEXT("blueprintPath"), BlueprintPath)) return Err;
-
-	FString DispatcherName;
-	if (auto Err = RequireString(Params, TEXT("name"), DispatcherName)) return Err;
-
-	UBlueprint* Blueprint = LoadBlueprint(BlueprintPath);
-	if (!Blueprint)
-	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
-	}
-
-	FName DispatcherFName(*DispatcherName);
-
-	// Idempotency: if a variable with this name already exists, short-circuit
-	for (const FBPVariableDescription& Var : Blueprint->NewVariables)
-	{
-		if (Var.VarName == DispatcherFName)
-		{
-			auto Existed = MCPSuccess();
-			MCPSetExisted(Existed);
-			Existed->SetStringField(TEXT("blueprintPath"), BlueprintPath);
-			Existed->SetStringField(TEXT("name"), DispatcherName);
-			return MCPResult(Existed);
-		}
-	}
-
-	// Create the delegate signature graph so the compiler has a function to reference.
-	// Convention: "<Name>__DelegateSignature"
-	FString SigGraphName = DispatcherName + TEXT("__DelegateSignature");
-	UEdGraph* SigGraph = FBlueprintEditorUtils::CreateNewGraph(
-		Blueprint, FName(*SigGraphName),
-		UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
-	if (SigGraph)
-	{
-		Blueprint->DelegateSignatureGraphs.AddUnique(SigGraph);
-		SigGraph->SetFlags(RF_Transactional);
-		// Schema creates the proper function entry node for us
-		SigGraph->GetSchema()->CreateDefaultNodesForGraph(*SigGraph);
-	}
-
-	FEdGraphPinType PinType;
-	PinType.PinCategory = UEdGraphSchema_K2::PC_MCDelegate;
-	if (SigGraph)
-	{
-		PinType.PinSubCategoryMemberReference.MemberName = SigGraph->GetFName();
-		PinType.PinSubCategoryMemberReference.MemberGuid = SigGraph->GraphGuid;
-	}
-
-	bool bSuccess = FBlueprintEditorUtils::AddMemberVariable(Blueprint, DispatcherFName, PinType);
-
-	if (bSuccess)
-	{
-		// Compile and save
-		FKismetEditorUtilities::CompileBlueprint(Blueprint);
-		SaveAssetPackage(Blueprint);
-
-		auto Result = MCPSuccess();
-		MCPSetCreated(Result);
-		Result->SetStringField(TEXT("blueprintPath"), BlueprintPath);
-		Result->SetStringField(TEXT("name"), DispatcherName);
-
-		// Rollback: delete_variable (dispatcher is a member variable under the hood)
-		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-		Payload->SetStringField(TEXT("path"), BlueprintPath);
-		Payload->SetStringField(TEXT("name"), DispatcherName);
-		MCPSetRollback(Result, TEXT("delete_variable"), Payload);
-
-		return MCPResult(Result);
-	}
-	else
-	{
-		return MCPError(FString::Printf(TEXT("Failed to add event dispatcher: %s"), *DispatcherName));
-	}
-}
-
-TSharedPtr<FJsonValue> FBlueprintHandlers::RenameFunction(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
-
-	FString OldName;
-	if (auto Err = RequireString(Params, TEXT("oldName"), OldName)) return Err;
-
-	FString NewName;
-	if (auto Err = RequireString(Params, TEXT("newName"), NewName)) return Err;
-
-	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint)
-	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
-	}
-
-	// Find the function graph
-	UEdGraph* FoundGraph = nullptr;
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == OldName)
-		{
-			FoundGraph = Graph;
-			break;
-		}
-	}
-
-	if (!FoundGraph)
-	{
-		return MCPError(FString::Printf(TEXT("Function not found: %s"), *OldName));
-	}
-
-	FBlueprintEditorUtils::RenameGraph(FoundGraph, NewName);
-
-	FKismetEditorUtilities::CompileBlueprint(Blueprint);
-	SaveAssetPackage(Blueprint);
-
-	auto Result = MCPSuccess();
-	MCPSetUpdated(Result);
-	Result->SetStringField(TEXT("path"), AssetPath);
-	Result->SetStringField(TEXT("oldName"), OldName);
-	Result->SetStringField(TEXT("newName"), NewName);
-
-	// Self-inverse: rename back.
-	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("path"), AssetPath);
-	Payload->SetStringField(TEXT("oldName"), NewName);
-	Payload->SetStringField(TEXT("newName"), OldName);
-	MCPSetRollback(Result, TEXT("rename_function"), Payload);
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FBlueprintHandlers::DeleteFunction(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
-
-	FString FunctionName;
-	if (auto Err = RequireString(Params, TEXT("functionName"), FunctionName)) return Err;
-
-	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint)
-	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
-	}
-
-	UEdGraph* FoundGraph = nullptr;
-	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == FunctionName)
-		{
-			FoundGraph = Graph;
-			break;
-		}
-	}
-
-	// Idempotent: no function to delete is a no-op.
-	if (!FoundGraph)
-	{
-		auto Noop = MCPSuccess();
-		Noop->SetStringField(TEXT("path"), AssetPath);
-		Noop->SetStringField(TEXT("functionName"), FunctionName);
-		Noop->SetBoolField(TEXT("alreadyDeleted"), true);
-		return MCPResult(Noop);
-	}
-
-	FBlueprintEditorUtils::RemoveGraph(Blueprint, FoundGraph);
-
-	FKismetEditorUtilities::CompileBlueprint(Blueprint);
-	SaveAssetPackage(Blueprint);
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("path"), AssetPath);
-	Result->SetStringField(TEXT("functionName"), FunctionName);
-	Result->SetBoolField(TEXT("deleted"), true);
-	// Delete of a function is not reversible by default.
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FBlueprintHandlers::CreateBlueprintInterface(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
-
-	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
-
-	// Idempotency: check if asset already exists.
-	if (UBlueprint* Existing = LoadBlueprint(AssetPath))
-	{
-		if (OnConflict == TEXT("error"))
-		{
-			return MCPError(FString::Printf(TEXT("Interface '%s' already exists"), *AssetPath));
-		}
-		auto Result = MCPSuccess();
-		MCPSetExisted(Result);
-		Result->SetStringField(TEXT("path"), AssetPath);
-		Result->SetStringField(TEXT("name"), Existing->GetName());
-		return MCPResult(Result);
-	}
-
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
-	FString PackageName;
-	FString AssetName;
-	AssetPath.Split(TEXT("/"), &PackageName, &AssetName, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
-
-	UBlueprintFactory* BlueprintFactory = NewObject<UBlueprintFactory>();
-	BlueprintFactory->BlueprintType = BPTYPE_Interface;
-	BlueprintFactory->ParentClass = UInterface::StaticClass();
-
-	UBlueprint* NewInterface = Cast<UBlueprint>(AssetTools.CreateAsset(AssetName, PackageName, UBlueprint::StaticClass(), BlueprintFactory));
-	if (!NewInterface)
-	{
-		return MCPError(TEXT("Failed to create Blueprint Interface"));
-	}
-
-	FKismetEditorUtilities::CompileBlueprint(NewInterface);
-
-	const FString ObjectPath = NewInterface->GetPathName();
-
-	auto Result = MCPSuccess();
-	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), AssetPath);
-	Result->SetStringField(TEXT("name"), NewInterface->GetName());
-
-	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("assetPath"), ObjectPath);
-	MCPSetRollback(Result, TEXT("delete_asset"), Payload);
-
-	return MCPResult(Result);
-}
-
-// ============================================================================
-// NEW HANDLERS
-// ============================================================================
-
-TSharedPtr<FJsonValue> FBlueprintHandlers::ListNodeTypesDetailed(const TSharedPtr<FJsonObject>& Params)
-{
-	// Static catalog of common K2Node types with descriptions and categories
-	struct FNodeTypeEntry
-	{
-		const TCHAR* Name;
-		const TCHAR* Category;
-		const TCHAR* Description;
-		const TCHAR* ClassName;
-	};
-
-	static const FNodeTypeEntry CommonNodes[] =
-	{
-		// Flow Control
-		{ TEXT("Branch"), TEXT("Flow Control"), TEXT("If/else conditional branch"), TEXT("K2Node_IfThenElse") },
-		{ TEXT("Sequence"), TEXT("Flow Control"), TEXT("Execute multiple outputs in order"), TEXT("K2Node_ExecutionSequence") },
-		{ TEXT("DoOnce"), TEXT("Flow Control"), TEXT("Execute only the first time"), TEXT("K2Node_DoOnceMultiInput") },
-		{ TEXT("FlipFlop"), TEXT("Flow Control"), TEXT("Alternates between two outputs"), TEXT("K2Node_FlipFlop") },
-		{ TEXT("Gate"), TEXT("Flow Control"), TEXT("Open/close execution gate"), TEXT("K2Node_Gate") },
-		{ TEXT("ForEachLoop"), TEXT("Flow Control"), TEXT("Loop over array elements"), TEXT("K2Node_ForEachElementInEnum") },
-		{ TEXT("WhileLoop"), TEXT("Flow Control"), TEXT("Loop while condition is true"), TEXT("K2Node_WhileLoop") },
-		{ TEXT("Select"), TEXT("Flow Control"), TEXT("Select output based on index"), TEXT("K2Node_Select") },
-		{ TEXT("Switch"), TEXT("Flow Control"), TEXT("Switch on value (int, string, enum, name)"), TEXT("K2Node_Switch") },
-		{ TEXT("Delay"), TEXT("Flow Control"), TEXT("Wait for specified time before continuing"), TEXT("K2Node_Delay") },
-
-		// Events
-		{ TEXT("EventBeginPlay"), TEXT("Events"), TEXT("Called when play begins"), TEXT("K2Node_Event") },
-		{ TEXT("EventTick"), TEXT("Events"), TEXT("Called every frame"), TEXT("K2Node_Event") },
-		{ TEXT("EventActorBeginOverlap"), TEXT("Events"), TEXT("Called when an actor overlaps"), TEXT("K2Node_Event") },
-		{ TEXT("EventHit"), TEXT("Events"), TEXT("Called when actor is hit"), TEXT("K2Node_Event") },
-		{ TEXT("EventAnyDamage"), TEXT("Events"), TEXT("Called when any damage is received"), TEXT("K2Node_Event") },
-		{ TEXT("CustomEvent"), TEXT("Events"), TEXT("User-defined custom event"), TEXT("K2Node_CustomEvent") },
-		{ TEXT("EventDispatcher"), TEXT("Events"), TEXT("Multicast delegate event dispatcher"), TEXT("K2Node_CreateDelegate") },
-		{ TEXT("InputAction"), TEXT("Events"), TEXT("Respond to input action"), TEXT("K2Node_InputAction") },
-		{ TEXT("InputKey"), TEXT("Events"), TEXT("Respond to key press/release"), TEXT("K2Node_InputKey") },
-
-		// Functions
-		{ TEXT("CallFunction"), TEXT("Functions"), TEXT("Call a function by name"), TEXT("K2Node_CallFunction") },
-		{ TEXT("PrintString"), TEXT("Functions"), TEXT("Print text to screen/log"), TEXT("K2Node_CallFunction") },
-		{ TEXT("SpawnActor"), TEXT("Functions"), TEXT("Spawn an actor from class"), TEXT("K2Node_SpawnActorFromClass") },
-		{ TEXT("DestroyActor"), TEXT("Functions"), TEXT("Destroy an actor"), TEXT("K2Node_CallFunction") },
-		{ TEXT("GetAllActorsOfClass"), TEXT("Functions"), TEXT("Get all actors of a specific class"), TEXT("K2Node_CallFunction") },
-		{ TEXT("SetTimer"), TEXT("Functions"), TEXT("Set a timer by function name or event"), TEXT("K2Node_CallFunction") },
-		{ TEXT("ClearTimer"), TEXT("Functions"), TEXT("Clear/invalidate a timer"), TEXT("K2Node_CallFunction") },
-
-		// Variables
-		{ TEXT("VariableGet"), TEXT("Variables"), TEXT("Get the value of a variable"), TEXT("K2Node_VariableGet") },
-		{ TEXT("VariableSet"), TEXT("Variables"), TEXT("Set the value of a variable"), TEXT("K2Node_VariableSet") },
-		{ TEXT("MakeArray"), TEXT("Variables"), TEXT("Construct an array from elements"), TEXT("K2Node_MakeArray") },
-		{ TEXT("MakeStruct"), TEXT("Variables"), TEXT("Construct a struct from members"), TEXT("K2Node_MakeStruct") },
-		{ TEXT("BreakStruct"), TEXT("Variables"), TEXT("Break a struct into its members"), TEXT("K2Node_BreakStruct") },
-
-		// Math
-		{ TEXT("Add"), TEXT("Math"), TEXT("Add two values (int, float, vector)"), TEXT("K2Node_CallFunction") },
-		{ TEXT("Subtract"), TEXT("Math"), TEXT("Subtract two values"), TEXT("K2Node_CallFunction") },
-		{ TEXT("Multiply"), TEXT("Math"), TEXT("Multiply two values"), TEXT("K2Node_CallFunction") },
-		{ TEXT("Divide"), TEXT("Math"), TEXT("Divide two values"), TEXT("K2Node_CallFunction") },
-		{ TEXT("RandomFloat"), TEXT("Math"), TEXT("Generate random float in range"), TEXT("K2Node_CallFunction") },
-		{ TEXT("Clamp"), TEXT("Math"), TEXT("Clamp value between min and max"), TEXT("K2Node_CallFunction") },
-		{ TEXT("Lerp"), TEXT("Math"), TEXT("Linear interpolation"), TEXT("K2Node_CallFunction") },
-		{ TEXT("VectorLength"), TEXT("Math"), TEXT("Get length of a vector"), TEXT("K2Node_CallFunction") },
-		{ TEXT("Normalize"), TEXT("Math"), TEXT("Normalize a vector"), TEXT("K2Node_CallFunction") },
-
-		// Casting & Type
-		{ TEXT("Cast"), TEXT("Casting"), TEXT("Cast to a specific class"), TEXT("K2Node_DynamicCast") },
-		{ TEXT("IsValid"), TEXT("Casting"), TEXT("Check if object reference is valid"), TEXT("K2Node_CallFunction") },
-		{ TEXT("ClassIsChildOf"), TEXT("Casting"), TEXT("Check class inheritance"), TEXT("K2Node_CallFunction") },
-
-		// String
-		{ TEXT("Format"), TEXT("String"), TEXT("Format text with arguments"), TEXT("K2Node_FormatText") },
-		{ TEXT("Append"), TEXT("String"), TEXT("Concatenate strings"), TEXT("K2Node_CallFunction") },
-		{ TEXT("Contains"), TEXT("String"), TEXT("Check if string contains substring"), TEXT("K2Node_CallFunction") },
-
-		// Utility
-		{ TEXT("CreateWidget"), TEXT("Utility"), TEXT("Create a UMG widget instance"), TEXT("K2Node_CreateWidget") },
-		{ TEXT("Macro"), TEXT("Utility"), TEXT("Instance of a macro graph"), TEXT("K2Node_MacroInstance") },
-		{ TEXT("Comment"), TEXT("Utility"), TEXT("Comment box for organizing graphs"), TEXT("EdGraphNode_Comment") },
-		{ TEXT("Reroute"), TEXT("Utility"), TEXT("Reroute node for cleaner wiring"), TEXT("K2Node_Knot") },
-	};
-
-	FString FilterCategory = OptionalString(Params, TEXT("category"));
-	FString LowerFilter = FilterCategory.ToLower();
-
-	TArray<TSharedPtr<FJsonValue>> NodeTypesArray;
-	for (const FNodeTypeEntry& Entry : CommonNodes)
-	{
-		if (!LowerFilter.IsEmpty())
-		{
-			FString EntryCat = FString(Entry.Category).ToLower();
-			if (!EntryCat.Contains(LowerFilter))
-			{
-				continue;
-			}
-		}
-
-		TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
-		NodeObj->SetStringField(TEXT("name"), Entry.Name);
-		NodeObj->SetStringField(TEXT("category"), Entry.Category);
-		NodeObj->SetStringField(TEXT("description"), Entry.Description);
-		NodeObj->SetStringField(TEXT("className"), Entry.ClassName);
-		NodeTypesArray.Add(MakeShared<FJsonValueObject>(NodeObj));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetArrayField(TEXT("nodeTypes"), NodeTypesArray);
-	Result->SetNumberField(TEXT("count"), NodeTypesArray.Num());
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FBlueprintHandlers::SearchCallableFunctions(const TSharedPtr<FJsonObject>& Params)
-{
-	FString Query;
-	if (auto Err = RequireString(Params, TEXT("query"), Query)) return Err;
-
-	int32 MaxResults = OptionalInt(Params, TEXT("maxResults"), 50);
-
-	FString LowerQuery = Query.ToLower();
-
-	// Build the list of library classes to search
-	TArray<UClass*> LibraryClasses;
-	LibraryClasses.Add(UKismetSystemLibrary::StaticClass());
-	LibraryClasses.Add(UGameplayStatics::StaticClass());
-	LibraryClasses.Add(UKismetMathLibrary::StaticClass());
-	LibraryClasses.Add(UKismetStringLibrary::StaticClass());
-	LibraryClasses.Add(UKismetArrayLibrary::StaticClass());
-	LibraryClasses.Add(AActor::StaticClass());
-	LibraryClasses.Add(APawn::StaticClass());
-	LibraryClasses.Add(APlayerController::StaticClass());
-
-	// Optionally filter by a specific class
-	FString TargetClassName = OptionalString(Params, TEXT("targetClass"));
-	if (!TargetClassName.IsEmpty())
-	{
-		UClass* TargetClass = FindObject<UClass>(nullptr, *TargetClassName);
-		if (!TargetClass)
-		{
-			TargetClass = FindObject<UClass>(nullptr, *(TEXT("U") + TargetClassName));
-		}
-		if (!TargetClass)
-		{
-			TargetClass = FindObject<UClass>(nullptr, *(TEXT("A") + TargetClassName));
-		}
-		if (TargetClass)
-		{
-			LibraryClasses.Empty();
-			LibraryClasses.Add(TargetClass);
-		}
-	}
-
-	TArray<TSharedPtr<FJsonValue>> ResultsArray;
-
-	for (UClass* SearchClass : LibraryClasses)
-	{
-		if (!SearchClass) continue;
-
-		for (TFieldIterator<UFunction> FuncIt(SearchClass); FuncIt; ++FuncIt)
-		{
-			UFunction* Func = *FuncIt;
-			if (!Func) continue;
-
-			// Only include blueprint-callable functions
-			if (!Func->HasAnyFunctionFlags(FUNC_BlueprintCallable | FUNC_BlueprintPure)) continue;
-
-			FString FuncName = Func->GetName();
-			FString LowerFuncName = FuncName.ToLower();
-
-			if (!LowerFuncName.Contains(LowerQuery)) continue;
-
-			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
-			Entry->SetStringField(TEXT("name"), FuncName);
-			Entry->SetStringField(TEXT("class"), SearchClass->GetName());
-			Entry->SetStringField(TEXT("fullPath"), Func->GetPathName());
-
-			// Pure vs impure
-			Entry->SetBoolField(TEXT("isPure"), Func->HasAnyFunctionFlags(FUNC_BlueprintPure));
-			Entry->SetBoolField(TEXT("isStatic"), Func->HasAnyFunctionFlags(FUNC_Static));
-
-			// Collect parameters info
-			TArray<TSharedPtr<FJsonValue>> ParamsArray;
-			FString ReturnType;
-			for (TFieldIterator<FProperty> PropIt(Func); PropIt; ++PropIt)
-			{
-				FProperty* Prop = *PropIt;
-				if (!Prop) continue;
-
-				if (Prop->HasAnyPropertyFlags(CPF_ReturnParm))
-				{
-					ReturnType = Prop->GetCPPType();
-				}
-				else if (Prop->HasAnyPropertyFlags(CPF_Parm))
-				{
-					TSharedPtr<FJsonObject> ParamObj = MakeShared<FJsonObject>();
-					ParamObj->SetStringField(TEXT("name"), Prop->GetName());
-					ParamObj->SetStringField(TEXT("type"), Prop->GetCPPType());
-					ParamObj->SetBoolField(TEXT("isOutput"), Prop->HasAnyPropertyFlags(CPF_OutParm));
-					ParamsArray.Add(MakeShared<FJsonValueObject>(ParamObj));
-				}
-			}
-			Entry->SetArrayField(TEXT("parameters"), ParamsArray);
-			if (!ReturnType.IsEmpty())
-			{
-				Entry->SetStringField(TEXT("returnType"), ReturnType);
-			}
-
-			// Tooltip from metadata
-			FString Tooltip = Func->GetMetaData(TEXT("ToolTip"));
-			if (!Tooltip.IsEmpty())
-			{
-				Entry->SetStringField(TEXT("tooltip"), Tooltip);
-			}
-
-			ResultsArray.Add(MakeShared<FJsonValueObject>(Entry));
-
-			if (ResultsArray.Num() >= MaxResults)
-			{
-				break;
-			}
-		}
-
-		if (ResultsArray.Num() >= MaxResults)
-		{
-			break;
-		}
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetArrayField(TEXT("results"), ResultsArray);
-	Result->SetNumberField(TEXT("count"), ResultsArray.Num());
-	Result->SetStringField(TEXT("query"), Query);
 	return MCPResult(Result);
 }
 TSharedPtr<FJsonValue> FBlueprintHandlers::RemoveComponent(const TSharedPtr<FJsonObject>& Params)

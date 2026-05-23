@@ -16,6 +16,7 @@ private:
 	static TSharedPtr<FJsonValue> ReadPCGGraph(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddPCGNode(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ConnectPCGNodes(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> DisconnectPCGNodes(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RemovePCGNode(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetPCGNodeSettings(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ExecutePCGGraph(const TSharedPtr<FJsonObject>& Params);
@@ -30,4 +31,8 @@ private:
 	static TSharedPtr<FJsonValue> ForceRegeneratePCG(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CleanupPCG(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ToggleGraphPCG(const TSharedPtr<FJsonObject>& Params);
+
+	// issue #213 — bulk graph authoring via JSON spec.
+	static TSharedPtr<FJsonValue> ImportGraph(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ExportGraph(const TSharedPtr<FJsonObject>& Params);
 };

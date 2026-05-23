@@ -13,15 +13,17 @@
 ## 二、AI 需要读取的依赖文件
 
 - `Plugins/NePythonBinding/Tools/pystubs/ue/__init__.pyi`
+- `.codemaker/codewiki/nepy/gas-pitfalls.md` ⚠️ **必读**：NePy GAS 开发踩坑指南（CDO限制、CommitAbility替代、蓝图加载等）
 - `docs/01_英雄技能系统/step1.2_弹道技能完整链路.md`
 - `docs/01_英雄技能系统/step1.1_GAS角色骨架.md`
+- `docs/01_英雄技能系统/step1.3_实践总结.md`（本步实际实现记录）
 
 ---
 
 ## 三、前置条件
 
 - ✅ Step 1.2 完成：`GA_Fireball` 可正常激活并打出伤害
-- 🔲 `AttrSet_Base` 需要有 `Mana` / `MaxMana` 属性（或另建属性集）
+- ✅ `AttrSet_Base` 有 `Mana` / `MaxMana` 属性
 
 ---
 
@@ -31,15 +33,18 @@
 
 | 文件路径 | 类/函数 | 用途 |
 |----------|---------|------|
-| `Content/Scripts/gas/effects/ge_cooldown.py` | `GE_Cooldown_Fireball(ue.GameplayEffect)` | 冷却 GE：`HasDuration=5s`，给自身添加 `Tag.Cooldown.Fireball` |
-| `Content/Scripts/gas/effects/ge_cost.py` | `GE_Cost_Fireball(ue.GameplayEffect)` | 消耗 GE：`Instant`，Modifier 扣减 `Mana` |
-| `Content/Scripts/gas/abilities/ga_fireball.py` | 更新 `GA_Fireball` | 设置 `CooldownGameplayEffectClass` 和 `CostGameplayEffectClass` |
+| `Content/Scripts/gas/effects/ge_cooldown.py` | `GE_Cooldown_Fireball(ue.GameplayEffect)` | 冷却 GE Python 类（UClass 注册用，实际配置在蓝图） |
+| `Content/Scripts/gas/effects/ge_cost.py` | `GE_Cost_Fireball(ue.GameplayEffect)` | 消耗 GE Python 类（UClass 注册用，实际配置在蓝图） |
+| `Content/Scripts/gas/abilities/ga_fireball.py` | 更新 `GA_Fireball` | 新增 `try_commit_and_fire`、`configure_ge_classes`、`_load_ge` |
 
 ### 4.2 蓝图资产（手动创建）
 
 | 路径 | 父类 | 用途 |
 |------|------|------|
-| 不需要额外蓝图 | — | 全部由 Python 子类生成 |
+| `Content/Blueprint/GAS/BP_GE_Cost_Fireball` | `GameplayEffect` | 消耗 GE：Instant + Modifier Mana Add -20 |
+| `Content/Blueprint/GAS/BP_GE_Cooldown_Fireball` | `GameplayEffect` | 冷却 GE：HasDuration 5s + GE Components → 将标签赋予Actor → 添加到继承 → Cooldown.Fireball |
+
+> ⚠️ 实际实现中，GE Modifiers 和 Tag 无法在 Python 中配置（ArrayWrapper 限制），必须通过蓝图资产承载。Python 类仅用于 UClass 注册。
 
 ---
 
@@ -48,91 +53,64 @@
 ### 5.1 冷却 GE 设计
 
 `GE_Cooldown_Fireball`：
-- `DurationPolicy = EGameplayEffectDurationType.HasDuration`（值=2）
-- `DurationMagnitude` 设置冷却时长（如 5.0 秒）
-- 通过 `CooldownGameplayEffectClass` 属性挂在 `GA_Fireball` 上
-- `GA_Fireball` 需声明 `GameplayTag`：`Tag.Cooldown.Fireball`
-- `CommitAbility()` 时 ASC 自动应用冷却 GE 到自身
-- 冷却期间，ASC 检查 `ActivationBlockedTags`（或 `AbilityTags` 对应的冷却 Tag）阻止再次激活
-
-**GA 上关键属性**（`__init__.pyi` 确认）：
-```python
-CooldownGameplayEffectClass: TSubclassOf[GameplayEffect]
-"""
-This GameplayEffect represents the cooldown.
-It will be applied when the ability is committed and the ability cannot be used
-again until it is expired.
-"""
-```
+- `DurationPolicy = HasDuration`，`DurationMagnitude` = 5.0 秒
+- 通过 GE Components → 将标签赋予Actor → 添加到继承 → `Cooldown.Fireball`
+- 挂在 `GA_Fireball.CooldownGameplayEffectClass` 上
+- 冷却期间，`asc.GetGameplayTagCount("Cooldown.Fireball")` > 0 → 拒绝激活
 
 ### 5.2 消耗 GE 设计
 
 `GE_Cost_Fireball`：
-- `DurationPolicy = EGameplayEffectDurationType.Instant`（值=0）
-- Modifier 扣减 `Mana`（如 -20 点）
-- 挂在 `CostGameplayEffectClass` 属性上
-- `CommitAbility()` 时自动应用
+- `DurationPolicy = Instant`
+- Modifier: `AttrSet_Base.Mana`, `Add`, `-20`
+- 挂在 `GA_Fireball.CostGameplayEffectClass` 上
 
-**GA 上关键属性**：
-```python
-CostGameplayEffectClass: TSubclassOf[GameplayEffect]
-"""
-This GameplayEffect represents the cost (mana, stamina, etc) of the ability.
-It will be applied when the ability is committed.
-"""
-```
-
-### 5.3 AttrSet_Base 扩展（如需 Mana）
-
-在 `Content/Scripts/gas/setup_character.py` 中扩展：
+### 5.3 AttrSet_Base 扩展
 
 ```python
 class AttrSet_Base(ue.AttributeSet):
-    Health: float = 100.0
-    MaxHealth: float = 100.0
-    Mana: float = 100.0       # 新增
-    MaxMana: float = 100.0    # 新增
-    AttackPower: float = 10.0
-    MoveSpeed: float = 600.0
+    Health = ue.uproperty(100.0)
+    MaxHealth = ue.uproperty(100.0)
+    Mana = ue.uproperty(100.0)       # 新增
+    MaxMana = ue.uproperty(100.0)    # 新增
+    AttackPower = ue.uproperty(10.0)
+    MoveSpeed = ue.uproperty(600.0)
 ```
 
-### 5.4 冷却 Tag 阻断机制
+### 5.4 手动 Commit 模拟（关键）
 
-`GA_Fireball` 的 `AbilityTags` 和 `ActivationBlockedTags` 配合工作：
-- `AbilityTags` 包含 `"Ability.Fireball"`
-- 冷却 GE 的 Grant 或 Effect 给自身加 `"Cooldown.Fireball"`
-- `ActivationBlockedTags` 包含 `"Cooldown.Fireball"`
-- 冷却期间 ASC 检查 `ActivationBlockedTags` → 拒绝激活
-
-### 5.5 Python 中用 Tag 值设置 GE Duration
-
-注意：Python 中 `DurationMagnitude` 的类型为 `GameplayEffectModifierMagnitude`（StructBase）。需要查阅该子结构如何赋值，可能需要：
+由于 NePy CDO 限制，不能用 `CommitAbility()`，改为手动模拟：
 
 ```python
-ge_cd = GE_Cooldown_Fireball()
-ge_cd.DurationPolicy = ue.EGameplayEffectDurationType.HasDuration
-# DurationMagnitude 通常通过 ScalableFloat 或 SetByCaller 设置
-ge_cd.DurationMagnitude.ScalableFloatMagnitude.Value = 5.0  # 待验证
+def try_commit_and_fire(self, asc, avatar):
+    # 1. 检查冷却 Tag
+    if asc.GetGameplayTagCount(cooldown_tag) > 0: return False
+    # 2. 检查 Mana
+    if attr_set.Mana < 20: return False
+    # 3. Apply Cost GE
+    asc.ApplyGameplayEffectSpecToSelf(cost_spec)
+    # 4. Apply Cooldown GE
+    asc.ApplyGameplayEffectSpecToSelf(cooldown_spec)
+    # 5. 发射
+    self.do_fireball(asc, avatar)
 ```
 
-**API 搜到的**：
-- `GameplayEffect.DurationPolicy: EGameplayEffectDurationType`
-- `GameplayEffect.DurationMagnitude: GameplayEffectModifierMagnitude`
-- `GameplayEffect.Modifiers: ArrayWrapper[GameplayModifierInfo]`
+### 5.5 蓝图资产加载
 
-`GameplayEffectModifierMagnitude` 可能需要进一步搜索其属性。若 Python 设置不便，可改为在蓝图中配置 GE 蓝图。
+PIE 中 `ue.LoadObject` 不可用，改用 `ue.FindObject(path_C)`。
 
 ---
 
-## 六、待验证 API（当前不确认，务必列出）
+## 六、已验证 API
 
 | API 调用 | 预期行为 | 实际结果 |
 |---------|---------|---------|
-| `GameplayEffect.DurationMagnitude` 属性赋值 | Python 中能否直接设冷却时长 | 待测试 |
-| `GE_Cooldown` 通过 `CommitAbility()` 自动应用 | 冷却 GE 生效，阻止重复激活 | 待测试 |
-| `GE_Cost` 扣减 `Mana` 属性 | Modifier 正确引用 AttributeSet 属性 | 待测试 |
-| 冷却 Tag 通过 `ActivationBlockedTags` 阻断 | ASC 拒绝冷却期间的激活 | 待测试 |
-| `GameplayEffectModifierMagnitude` 结构体 | 成员变量结构 | 需阅读完整 struct |
+| `GameplayEffect.DurationMagnitude.ScalableFloatMagnitude.Value = 5.0` | Python 中设冷却时长 | ✅ 蓝图配置更可靠 |
+| `asc.GetGameplayTagCount(tag)` | 查询冷却状态 | ✅ |
+| `asc.ApplyGameplayEffectSpecToSelf(spec)` | 对自身应用 GE | ✅ |
+| `asc.MakeOutgoingSpec(ge_class, 1.0, ctx)` | 构造 GE Spec | ✅ |
+| `ue.FindObject(path_C)` | PIE 中加载蓝图资产 | ✅ |
+| `attr_set.Mana` | 读取属性值 | ✅ |
 
 ---
 
@@ -141,22 +119,24 @@ ge_cd.DurationMagnitude.ScalableFloatMagnitude.Value = 5.0  # 待验证
 | 漫威观察 | UE5 对应 |
 |----------|---------|
 | 技能图标上有倒计时数字 | Cooldown GE HasDuration → UI 监听 Tag 或 GE 剩余时间 |
-| 法力条不足时技能图标变灰 | Cost GE 检查 Mana 是否足够 → `CommitAbility` 返回 False |
-| 冷却期间按钮不可点 | `TryActivateAbility` 返回 False（ActivationBlockedTags 阻断） |
+| 法力条不足时技能图标变灰 | Cost GE 检查 Mana 是否足够 → 拒绝激活 |
+| 冷却期间按钮不可点 | `GetGameplayTagCount` 检查冷却 Tag → 拒绝 |
 | 不同技能冷却时间不同 | 不同 GA 挂不同的 Cooldown GE 类 |
 
 ---
 
 ## 八、验证标准
 
-- [ ] `GE_Cooldown_Fireball` 作为 Python 类可被 `GA_Fireball.CooldownGameplayEffectClass` 引用
-- [ ] 激活 `GA_Fireball` 后，`ActivationBlockedTags` 阻止立即再次激活
-- [ ] 冷却结束后（Duration 到期），技能可再次激活
-- [ ] `GE_Cost_Fireball` 扣减 `Mana` 属性
-- [ ] 法力不足时 `CommitAbility()` 返回 False
+- [x] `GE_Cooldown_Fireball` 作为 Python 类可被 `GA_Fireball.CooldownGameplayEffectClass` 引用
+- [x] 冷却期间拒绝再次激活（连续 6 次被挡）
+- [x] 冷却 5 秒到期后技能可再次激活
+- [x] `GE_Cost_Fireball` 扣减 `Mana` 属性（每次 -20）
+- [x] 法力不足时（Mana < 20）拒绝激活
 
 ---
 
 ## 九、状态
 
-🔲 待开始
+✅ 已完成并 PIE 验证通过（2026-05-23）
+
+> 详细实现记录见 [`step1.3_实践总结.md`](step1.3_实践总结.md)

@@ -1,6 +1,7 @@
 #include "AnimationHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerAssetCreate.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
@@ -18,7 +19,11 @@
 #include "Animation/AnimNotifies/AnimNotify.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "Engine/SkeletalMeshSocket.h"
+// PhysicsEngine/SkeletalBodySetup.h is unavailable as a public include on
+// UE 5.4. USkeletalBodySetup is still defined transitively via PhysicsAsset.h.
+#if __has_include("PhysicsEngine/SkeletalBodySetup.h")
 #include "PhysicsEngine/SkeletalBodySetup.h"
+#endif
 #include "EditorScriptingUtilities/Public/EditorAssetLibrary.h"
 #include "Factories/AnimBlueprintFactory.h"
 #include "Factories/AnimMontageFactory.h"
@@ -68,13 +73,13 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("read_anim_montage"), &ReadAnimMontage);
 	Registry.RegisterHandler(TEXT("read_anim_sequence"), &ReadAnimSequence);
 	Registry.RegisterHandler(TEXT("create_anim_blueprint"), &CreateAnimBlueprint);
-	Registry.RegisterHandler(TEXT("create_montage"), &CreateMontage);
-	Registry.RegisterHandler(TEXT("create_anim_montage"), &CreateMontage);  // alias used by TS tools
+	Registry.RegisterHandler(TEXT("create_anim_montage"), &CreateMontage);
 	Registry.RegisterHandler(TEXT("create_blendspace"), &CreateBlendspace);
+	Registry.RegisterHandler(TEXT("add_blend_sample"), &AddBlendSample);
+	Registry.RegisterHandler(TEXT("set_blend_sample"), &SetBlendSample);
 	Registry.RegisterHandler(TEXT("read_blendspace"), &ReadBlendspace);
 	Registry.RegisterHandler(TEXT("add_anim_notify"), &AddAnimNotify);
 	Registry.RegisterHandler(TEXT("create_sequence"), &CreateSequence);
-	Registry.RegisterHandler(TEXT("create_anim_sequence"), &CreateSequence);  // alias
 	Registry.RegisterHandler(TEXT("set_bone_keyframes"), &SetBoneKeyframes);
 	Registry.RegisterHandler(TEXT("get_bone_transforms"), &GetBoneTransforms);
 	Registry.RegisterHandler(TEXT("set_montage_sequence"), &SetMontageSequence);
@@ -114,6 +119,7 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 
 	// v0.7.11 — issue fixes
 	Registry.RegisterHandler(TEXT("create_ik_retargeter"), &CreateIKRetargeter);
+	Registry.RegisterHandler(TEXT("read_ik_retargeter"), &ReadIKRetargeter);
 	Registry.RegisterHandler(TEXT("set_anim_blueprint_skeleton"), &SetAnimBlueprintSkeleton);
 	Registry.RegisterHandler(TEXT("read_bone_track"), &ReadBoneTrack);
 
@@ -124,10 +130,15 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// v0.7.15 — PoseSearch (motion matching)
 	Registry.RegisterHandler(TEXT("create_pose_search_database"), &CreatePoseSearchDatabase);
 	Registry.RegisterHandler(TEXT("set_pose_search_schema"), &SetPoseSearchSchema);
-	// Disabled for UE 5.6 compatibility
-	// Registry.RegisterHandler(TEXT("add_pose_search_sequence"), &AddPoseSearchSequence);
-	// Registry.RegisterHandler(TEXT("build_pose_search_index"), &BuildPoseSearchIndex);
-	// Registry.RegisterHandler(TEXT("read_pose_search_database"), &ReadPoseSearchDatabase);
+	Registry.RegisterHandler(TEXT("add_pose_search_sequence"), &AddPoseSearchSequence);
+	Registry.RegisterHandler(TEXT("build_pose_search_index"), &BuildPoseSearchIndex);
+	Registry.RegisterHandler(TEXT("read_pose_search_database"), &ReadPoseSearchDatabase);
+
+	// #419/#420 — live-actor skeletal reads + rebind + preview (moved from Level)
+	Registry.RegisterHandler(TEXT("get_bone_transform"), &GetBoneTransform);
+	Registry.RegisterHandler(TEXT("list_bones"), &ListBones);
+	Registry.RegisterHandler(TEXT("rebind_leader_pose"), &RebindLeaderPose);
+	Registry.RegisterHandler(TEXT("preview_animation"), &PreviewAnimation);
 }
 
 TSharedPtr<FJsonValue> FAnimationHandlers::ListAnimAssets(const TSharedPtr<FJsonObject>& Params)
@@ -500,83 +511,6 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ReadAnimMontage(const TSharedPtr<FJso
 
 	return MCPResult(Result);
 }
-
-// ---------------------------------------------------------------------------
-// read_anim_sequence
-// ---------------------------------------------------------------------------
-TSharedPtr<FJsonValue> FAnimationHandlers::ReadAnimSequence(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
-
-	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	UAnimSequence* AnimSeq = Cast<UAnimSequence>(LoadedAsset);
-	if (!AnimSeq)
-	{
-		return MCPError(FString::Printf(TEXT("Failed to load AnimSequence at '%s'"), *AssetPath));
-	}
-
-	auto Result = MCPSuccess();
-
-	Result->SetStringField(TEXT("assetPath"), AssetPath);
-	Result->SetStringField(TEXT("name"), AnimSeq->GetName());
-	Result->SetStringField(TEXT("class"), AnimSeq->GetClass()->GetName());
-
-	// Sequence length
-	Result->SetNumberField(TEXT("sequenceLength"), AnimSeq->GetPlayLength());
-
-	// Rate scale
-	Result->SetNumberField(TEXT("rateScale"), AnimSeq->RateScale);
-
-	// Number of frames and sampling frame rate
-	Result->SetNumberField(TEXT("numberOfFrames"), AnimSeq->GetNumberOfSampledKeys());
-	double SamplingRate = AnimSeq->GetSamplingFrameRate().AsDecimal();
-	Result->SetNumberField(TEXT("samplingFrameRate"), SamplingRate);
-
-	// Skeleton
-	USkeleton* Skeleton = AnimSeq->GetSkeleton();
-	if (Skeleton)
-	{
-		Result->SetStringField(TEXT("skeleton"), Skeleton->GetPathName());
-	}
-	else
-	{
-		Result->SetField(TEXT("skeleton"), MakeShared<FJsonValueNull>());
-	}
-
-	// Additive animation type
-	Result->SetBoolField(TEXT("isAdditive"), AnimSeq->AdditiveAnimType != EAdditiveAnimationType::AAT_None);
-
-	// Notifies
-	TArray<TSharedPtr<FJsonValue>> NotifiesArray;
-	for (const FAnimNotifyEvent& NotifyEvent : AnimSeq->Notifies)
-	{
-		TSharedPtr<FJsonObject> NotifyObj = MakeShared<FJsonObject>();
-		NotifyObj->SetStringField(TEXT("name"), NotifyEvent.NotifyName.ToString());
-		NotifyObj->SetNumberField(TEXT("triggerTime"), NotifyEvent.GetTriggerTime());
-		if (NotifyEvent.Notify)
-		{
-			NotifyObj->SetStringField(TEXT("class"), NotifyEvent.Notify->GetClass()->GetName());
-		}
-		NotifiesArray.Add(MakeShared<FJsonValueObject>(NotifyObj));
-	}
-	Result->SetArrayField(TEXT("notifies"), NotifiesArray);
-
-	// Curve names
-	TArray<TSharedPtr<FJsonValue>> CurvesArray;
-	const TArray<FFloatCurve>& Curves = AnimSeq->GetCurveData().FloatCurves;
-	for (const FFloatCurve& Curve : Curves)
-	{
-		CurvesArray.Add(MakeShared<FJsonValueString>(Curve.GetName().ToString()));
-	}
-	Result->SetArrayField(TEXT("curveNames"), CurvesArray);
-
-	return MCPResult(Result);
-}
-
-// ---------------------------------------------------------------------------
-// create_anim_blueprint
-// ---------------------------------------------------------------------------
 TSharedPtr<FJsonValue> FAnimationHandlers::CreateAnimBlueprint(const TSharedPtr<FJsonObject>& Params)
 {
 	FString Name;
@@ -589,20 +523,12 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateAnimBlueprint(const TSharedPtr<
 	FString ParentClassName = OptionalString(Params, TEXT("parentClass"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("AnimBlueprint")))
-	{
-		return Existing;
-	}
-
 	UObject* SkeletonAsset = UEditorAssetLibrary::LoadAsset(SkeletonPath);
 	USkeleton* Skeleton = Cast<USkeleton>(SkeletonAsset);
 	if (!Skeleton)
 	{
 		return MCPError(FString::Printf(TEXT("Failed to load Skeleton at '%s'"), *SkeletonPath));
 	}
-
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
 
 	UAnimBlueprintFactory* Factory = NewObject<UAnimBlueprintFactory>();
 	Factory->TargetSkeleton = Skeleton;
@@ -616,20 +542,17 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateAnimBlueprint(const TSharedPtr<
 		}
 	}
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, UAnimBlueprint::StaticClass(), Factory);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create AnimBlueprint"));
-	}
+	auto Created = MCPCreateAssetIdempotent<UAnimBlueprint>(Name, PackagePath, OnConflict, TEXT("AnimBlueprint"), Factory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
-	Result->SetStringField(TEXT("name"), NewAsset->GetName());
-	Result->SetStringField(TEXT("class"), NewAsset->GetClass()->GetName());
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
+	Result->SetStringField(TEXT("name"), Created.Asset->GetName());
+	Result->SetStringField(TEXT("class"), Created.Asset->GetClass()->GetName());
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 
 	return MCPResult(Result);
 }
@@ -648,11 +571,6 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateMontage(const TSharedPtr<FJsonO
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Animations"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("AnimMontage")))
-	{
-		return Existing;
-	}
-
 	UObject* SourceAsset = UEditorAssetLibrary::LoadAsset(AnimSequencePath);
 	UAnimSequence* SourceSequence = Cast<UAnimSequence>(SourceAsset);
 	if (!SourceSequence)
@@ -660,27 +578,21 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateMontage(const TSharedPtr<FJsonO
 		return MCPError(FString::Printf(TEXT("Failed to load AnimSequence at '%s'"), *AnimSequencePath));
 	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
 	UAnimMontageFactory* Factory = NewObject<UAnimMontageFactory>();
 	Factory->TargetSkeleton = SourceSequence->GetSkeleton();
 	Factory->SourceAnimation = SourceSequence;
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, UAnimMontage::StaticClass(), Factory);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create AnimMontage"));
-	}
+	auto Created = MCPCreateAssetIdempotent<UAnimMontage>(Name, PackagePath, OnConflict, TEXT("AnimMontage"), Factory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
-	Result->SetStringField(TEXT("name"), NewAsset->GetName());
-	Result->SetStringField(TEXT("class"), NewAsset->GetClass()->GetName());
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
+	Result->SetStringField(TEXT("name"), Created.Asset->GetName());
+	Result->SetStringField(TEXT("class"), Created.Asset->GetClass()->GetName());
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 
 	return MCPResult(Result);
 }
@@ -870,11 +782,6 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateBlendspace(const TSharedPtr<FJs
 	FString AxisVertical = OptionalString(Params, TEXT("axisVertical"), TEXT("Direction"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("BlendSpace")))
-	{
-		return Existing;
-	}
-
 	double HorizontalMin = OptionalNumber(Params, TEXT("horizontalMin"), 0.0);
 	double HorizontalMax = OptionalNumber(Params, TEXT("horizontalMax"), 500.0);
 	double VerticalMin = OptionalNumber(Params, TEXT("verticalMin"), -180.0);
@@ -887,357 +794,190 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateBlendspace(const TSharedPtr<FJs
 		return MCPError(FString::Printf(TEXT("Failed to load Skeleton at '%s'"), *SkeletonPath));
 	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
 	UBlendSpaceFactoryNew* Factory = NewObject<UBlendSpaceFactoryNew>();
 	Factory->TargetSkeleton = Skeleton;
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, UBlendSpace::StaticClass(), Factory);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create BlendSpace"));
-	}
+	auto Created = MCPCreateAssetIdempotent<UBlendSpace>(Name, PackagePath, OnConflict, TEXT("BlendSpace"), Factory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UBlendSpace* BlendSpace = Cast<UBlendSpace>(NewAsset);
-	if (BlendSpace)
-	{
-		FBlendParameter& BlendParam0 = const_cast<FBlendParameter&>(BlendSpace->GetBlendParameter(0));
-		BlendParam0.DisplayName = AxisHorizontal;
-		BlendParam0.Min = HorizontalMin;
-		BlendParam0.Max = HorizontalMax;
+	UBlendSpace* BlendSpace = Created.Asset;
+	FBlendParameter& BlendParam0 = const_cast<FBlendParameter&>(BlendSpace->GetBlendParameter(0));
+	BlendParam0.DisplayName = AxisHorizontal;
+	BlendParam0.Min = HorizontalMin;
+	BlendParam0.Max = HorizontalMax;
 
-		FBlendParameter& BlendParam1 = const_cast<FBlendParameter&>(BlendSpace->GetBlendParameter(1));
-		BlendParam1.DisplayName = AxisVertical;
-		BlendParam1.Min = VerticalMin;
-		BlendParam1.Max = VerticalMax;
-	}
+	FBlendParameter& BlendParam1 = const_cast<FBlendParameter&>(BlendSpace->GetBlendParameter(1));
+	BlendParam1.DisplayName = AxisVertical;
+	BlendParam1.Min = VerticalMin;
+	BlendParam1.Max = VerticalMax;
 
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(BlendSpace->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
-	Result->SetStringField(TEXT("name"), NewAsset->GetName());
-	Result->SetStringField(TEXT("class"), NewAsset->GetClass()->GetName());
+	Result->SetStringField(TEXT("path"), BlendSpace->GetPathName());
+	Result->SetStringField(TEXT("name"), BlendSpace->GetName());
+	Result->SetStringField(TEXT("class"), BlendSpace->GetClass()->GetName());
 	Result->SetStringField(TEXT("axisHorizontal"), AxisHorizontal);
 	Result->SetStringField(TEXT("axisVertical"), AxisVertical);
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	MCPSetDeleteAssetRollback(Result, BlendSpace->GetPathName());
 
 	return MCPResult(Result);
 }
 
 // ---------------------------------------------------------------------------
-// create_sequence — Create a blank AnimSequence on a skeleton
-// Params: name, skeletonPath, packagePath?, numFrames?, frameRate?
+// #248: append a sample to a BlendSpace's SampleData. UBlendSpace::AddSample
+// is the canonical entry point - it validates the position against axis
+// ranges + sets the GridSamples cache so the editor preview matches.
 // ---------------------------------------------------------------------------
-TSharedPtr<FJsonValue> FAnimationHandlers::CreateSequence(const TSharedPtr<FJsonObject>& Params)
-{
-	FString Name;
-	if (auto Err = RequireString(Params, TEXT("name"), Name)) return Err;
-
-	FString SkeletonPath;
-	if (auto Err = RequireString(Params, TEXT("skeletonPath"), SkeletonPath)) return Err;
-
-	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Animations"));
-	double FrameRate = OptionalNumber(Params, TEXT("frameRate"), 30.0);
-	double NumFrames = OptionalNumber(Params, TEXT("numFrames"), 30.0);
-	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
-
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("AnimSequence")))
-	{
-		return Existing;
-	}
-
-	UObject* SkeletonAsset = UEditorAssetLibrary::LoadAsset(SkeletonPath);
-	USkeleton* Skeleton = Cast<USkeleton>(SkeletonAsset);
-	if (!Skeleton)
-	{
-		USkeletalMesh* SkelMesh = Cast<USkeletalMesh>(SkeletonAsset);
-		if (SkelMesh)
-		{
-			Skeleton = SkelMesh->GetSkeleton();
-		}
-	}
-	if (!Skeleton)
-	{
-		return MCPError(FString::Printf(TEXT("Failed to load Skeleton at '%s'"), *SkeletonPath));
-	}
-
-	FString FullAssetPath = PackagePath / Name;
-
-	// Create the package
-	FString PackageName = PackagePath / Name;
-	UPackage* Package = CreatePackage(*PackageName);
-	if (!Package)
-	{
-		return MCPError(TEXT("Failed to create package"));
-	}
-
-	// Create the AnimSequence
-	UAnimSequence* NewSeq = NewObject<UAnimSequence>(Package, *Name, RF_Public | RF_Standalone);
-	if (!NewSeq)
-	{
-		return MCPError(TEXT("Failed to create AnimSequence"));
-	}
-
-	NewSeq->SetSkeleton(Skeleton);
-
-	// Set up frame count and duration via the data controller
-	IAnimationDataController& Controller = NewSeq->GetController();
-
-	FFrameRate DesiredFrameRate(static_cast<int32>(FrameRate), 1);
-	int32 FrameCount = static_cast<int32>(NumFrames);
-
-	// Initialize the data model first — required before any modifications
-	Controller.InitializeModel();
-	Controller.OpenBracket(NSLOCTEXT("MCP", "CreateSequence", "MCP Create Sequence"));
-	Controller.SetFrameRate(DesiredFrameRate);
-	Controller.SetNumberOfFrames(FrameCount);
-	Controller.NotifyPopulated();
-	Controller.CloseBracket(false);
-
-	// Clear any lingering transactions to prevent "transaction still pending" crashes
-	// when users later interact with the asset in the editor (e.g. bake to control rig)
-	GEditor->ResetTransaction(NSLOCTEXT("MCP", "CreateSequenceReset", "MCP Create Sequence Complete"));
-
-	NewSeq->PostEditChange();
-	NewSeq->MarkPackageDirty();
-
-	UEditorAssetLibrary::SaveAsset(FullAssetPath);
-
-	auto Result = MCPSuccess();
-	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), FullAssetPath);
-	Result->SetStringField(TEXT("name"), Name);
-	Result->SetStringField(TEXT("skeleton"), Skeleton->GetPathName());
-	Result->SetNumberField(TEXT("numFrames"), NumFrames);
-	Result->SetNumberField(TEXT("frameRate"), FrameRate);
-	Result->SetNumberField(TEXT("sequenceLength"), NewSeq->GetPlayLength());
-	MCPSetDeleteAssetRollback(Result, NewSeq->GetPathName());
-
-	return MCPResult(Result);
-}
-
-// ---------------------------------------------------------------------------
-// set_bone_keyframes — Set bone transform keyframes on an AnimSequence
-// Params: assetPath, boneName, keyframes[]
-//   Each keyframe: { frame, location?: {x,y,z}, rotation?: {x,y,z,w}, scale?: {x,y,z} }
-// ---------------------------------------------------------------------------
-TSharedPtr<FJsonValue> FAnimationHandlers::SetBoneKeyframes(const TSharedPtr<FJsonObject>& Params)
+TSharedPtr<FJsonValue> FAnimationHandlers::AddBlendSample(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
 
-	FString BoneName;
-	if (auto Err = RequireString(Params, TEXT("boneName"), BoneName)) return Err;
-
-	const TArray<TSharedPtr<FJsonValue>>* KeyframesArray;
-	if (!Params->TryGetArrayField(TEXT("keyframes"), KeyframesArray))
+	UBlendSpace* BlendSpace = LoadAssetByPath<UBlendSpace>(AssetPath);
+	if (!BlendSpace)
 	{
-		return MCPError(TEXT("Missing 'keyframes' array parameter"));
+		return MCPError(FString::Printf(TEXT("BlendSpace not found at '%s'"), *AssetPath));
 	}
 
-	// Load the anim sequence
-	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	UAnimSequence* AnimSeq = Cast<UAnimSequence>(LoadedAsset);
-	if (!AnimSeq)
+	FString AnimationPath;
+	if (auto Err = RequireString(Params, TEXT("animation"), AnimationPath)) return Err;
+	UAnimSequence* Anim = LoadAssetByPath<UAnimSequence>(AnimationPath);
+	if (!Anim)
 	{
-		return MCPError(FString::Printf(TEXT("Failed to load AnimSequence at '%s'"), *AssetPath));
+		return MCPError(FString::Printf(TEXT("AnimSequence not found at '%s'"), *AnimationPath));
 	}
 
-	// Verify bone exists in skeleton
-	USkeleton* Skeleton = AnimSeq->GetSkeleton();
-	if (!Skeleton)
+	double PosX = 0.0, PosY = 0.0;
+	const TSharedPtr<FJsonObject>* PosObj = nullptr;
+	if (Params->TryGetObjectField(TEXT("position"), PosObj) && PosObj && (*PosObj).IsValid())
 	{
-		return MCPError(TEXT("AnimSequence has no Skeleton"));
+		(*PosObj)->TryGetNumberField(TEXT("x"), PosX);
+		(*PosObj)->TryGetNumberField(TEXT("y"), PosY);
+	}
+	else
+	{
+		Params->TryGetNumberField(TEXT("x"), PosX);
+		Params->TryGetNumberField(TEXT("y"), PosY);
 	}
 
-	const FReferenceSkeleton& RefSkeleton = Skeleton->GetReferenceSkeleton();
-	int32 BoneIndex = RefSkeleton.FindBoneIndex(FName(*BoneName));
-	if (BoneIndex == INDEX_NONE)
+	BlendSpace->Modify();
+	const int32 NewSampleIndex = BlendSpace->AddSample(Anim, FVector(PosX, PosY, 0.0));
+	if (NewSampleIndex < 0)
 	{
-		return MCPError(FString::Printf(TEXT("Bone '%s' not found in skeleton"), *BoneName));
+		return MCPError(FString::Printf(
+			TEXT("BlendSpace::AddSample rejected position (%.3f, %.3f) - check axis ranges via read_blendspace."),
+			PosX, PosY));
 	}
-
-	IAnimationDataController& Controller = AnimSeq->GetController();
-	Controller.OpenBracket(NSLOCTEXT("MCP", "SetBoneKeyframes", "MCP Set Bone Keyframes"));
-
-	// Ensure bone track exists — add it if not present
-	const FName BoneFName(*BoneName);
-	const IAnimationDataModel* DataModel = AnimSeq->GetDataModel();
-	if (!DataModel->IsValidBoneTrackName(BoneFName))
-	{
-		Controller.AddBoneCurve(BoneFName);
-	}
-
-	// Get the reference pose transform for this bone as a default
-	FTransform RefPose = RefSkeleton.GetRefBonePose()[BoneIndex];
-
-	// Collect all keyframes into arrays, then call SetBoneTrackKeys once
-	TArray<FVector> Locations;
-	TArray<FQuat> Rotations;
-	TArray<FVector> Scales;
-
-	for (const TSharedPtr<FJsonValue>& KeyframeVal : *KeyframesArray)
-	{
-		const TSharedPtr<FJsonObject>* KeyframeObjPtr;
-		if (!KeyframeVal->TryGetObject(KeyframeObjPtr)) continue;
-		const TSharedPtr<FJsonObject>& KF = *KeyframeObjPtr;
-
-		// Start with reference pose as defaults
-		FVector Location = RefPose.GetLocation();
-		FQuat Rotation = RefPose.GetRotation();
-		FVector Scale = RefPose.GetScale3D();
-
-		// Override with provided values
-		const TSharedPtr<FJsonObject>* LocObj;
-		if (KF->TryGetObjectField(TEXT("location"), LocObj))
-		{
-			(*LocObj)->TryGetNumberField(TEXT("x"), Location.X);
-			(*LocObj)->TryGetNumberField(TEXT("y"), Location.Y);
-			(*LocObj)->TryGetNumberField(TEXT("z"), Location.Z);
-		}
-
-		const TSharedPtr<FJsonObject>* RotObj;
-		if (KF->TryGetObjectField(TEXT("rotation"), RotObj))
-		{
-			(*RotObj)->TryGetNumberField(TEXT("x"), Rotation.X);
-			(*RotObj)->TryGetNumberField(TEXT("y"), Rotation.Y);
-			(*RotObj)->TryGetNumberField(TEXT("z"), Rotation.Z);
-			(*RotObj)->TryGetNumberField(TEXT("w"), Rotation.W);
-		}
-
-		const TSharedPtr<FJsonObject>* ScaleObj;
-		if (KF->TryGetObjectField(TEXT("scale"), ScaleObj))
-		{
-			(*ScaleObj)->TryGetNumberField(TEXT("x"), Scale.X);
-			(*ScaleObj)->TryGetNumberField(TEXT("y"), Scale.Y);
-			(*ScaleObj)->TryGetNumberField(TEXT("z"), Scale.Z);
-		}
-
-		Locations.Add(Location);
-		Rotations.Add(Rotation);
-		Scales.Add(Scale);
-	}
-
-	// Set all keys at once
-	int32 KeyframeCount = Locations.Num();
-	if (KeyframeCount > 0)
-	{
-		Controller.SetBoneTrackKeys(BoneFName, Locations, Rotations, Scales);
-	}
-
-	Controller.CloseBracket(false);
-
-	// Clear any lingering transactions to prevent "transaction still pending" crashes
-	GEditor->ResetTransaction(NSLOCTEXT("MCP", "SetBoneKeyframesReset", "MCP Set Bone Keyframes Complete"));
-
-	AnimSeq->PostEditChange();
-	AnimSeq->MarkPackageDirty();
-	UEditorAssetLibrary::SaveAsset(AssetPath);
+	BlendSpace->PostEditChange();
+	SaveAssetPackage(BlendSpace);
 
 	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("assetPath"), AssetPath);
-	Result->SetStringField(TEXT("boneName"), BoneName);
-	Result->SetNumberField(TEXT("keyframesSet"), KeyframeCount);
-
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("assetPath"), BlendSpace->GetPathName());
+	Result->SetStringField(TEXT("animation"), Anim->GetPathName());
+	Result->SetNumberField(TEXT("sampleIndex"), NewSampleIndex);
+	Result->SetNumberField(TEXT("x"), PosX);
+	Result->SetNumberField(TEXT("y"), PosY);
 	return MCPResult(Result);
 }
 
 // ---------------------------------------------------------------------------
-// get_bone_transforms — Read reference pose transforms for specified bones
-// Params: skeletonPath, boneNames[]? (if omitted, returns all bones)
+// #272: relocate an existing BlendSpace sample (and optionally swap its
+// AnimSequence). UBlendSpace::EditSampleValue rewrites coordinates + refreshes
+// the GridSamples cache; the animation ref is swapped via SampleData direct
+// access since there is no first-class setter.
 // ---------------------------------------------------------------------------
-TSharedPtr<FJsonValue> FAnimationHandlers::GetBoneTransforms(const TSharedPtr<FJsonObject>& Params)
+TSharedPtr<FJsonValue> FAnimationHandlers::SetBlendSample(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
-	if (!Params->TryGetStringField(TEXT("skeletonPath"), AssetPath)
-		&& !Params->TryGetStringField(TEXT("assetPath"), AssetPath)
-		&& !Params->TryGetStringField(TEXT("path"), AssetPath))
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
+
+	UBlendSpace* BlendSpace = LoadAssetByPath<UBlendSpace>(AssetPath);
+	if (!BlendSpace)
 	{
-		return MCPError(TEXT("Missing 'skeletonPath' parameter"));
+		return MCPError(FString::Printf(TEXT("BlendSpace not found at '%s'"), *AssetPath));
 	}
 
-	// Load skeleton (accept either USkeleton or USkeletalMesh)
-	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	USkeleton* Skeleton = Cast<USkeleton>(LoadedAsset);
-	if (!Skeleton)
+	int32 SampleIndex = -1;
+	if (!Params->TryGetNumberField(TEXT("sampleIndex"), SampleIndex))
 	{
-		USkeletalMesh* SkelMesh = Cast<USkeletalMesh>(LoadedAsset);
-		if (SkelMesh) Skeleton = SkelMesh->GetSkeleton();
+		return MCPError(TEXT("Missing required parameter 'sampleIndex'"));
 	}
-	if (!Skeleton)
+	if (SampleIndex < 0 || SampleIndex >= BlendSpace->GetNumberOfBlendSamples())
 	{
-		return MCPError(FString::Printf(TEXT("Failed to load Skeleton from '%s'"), *AssetPath));
+		return MCPError(FString::Printf(
+			TEXT("sampleIndex %d out of range (0..%d)"),
+			SampleIndex, BlendSpace->GetNumberOfBlendSamples() - 1));
 	}
 
-	const FReferenceSkeleton& RefSkeleton = Skeleton->GetReferenceSkeleton();
-	const TArray<FTransform>& RefPose = RefSkeleton.GetRefBonePose();
+	const FBlendSample& Existing = BlendSpace->GetBlendSample(SampleIndex);
+	FVector NewPos = Existing.SampleValue;
 
-	// Optional bone name filter
-	TSet<FName> FilterBones;
-	const TArray<TSharedPtr<FJsonValue>>* BoneNamesArray;
-	if (Params->TryGetArrayField(TEXT("boneNames"), BoneNamesArray))
+	const TSharedPtr<FJsonObject>* PosObj = nullptr;
+	bool bHasPos = false;
+	if (Params->TryGetObjectField(TEXT("position"), PosObj) && PosObj && (*PosObj).IsValid())
 	{
-		for (const TSharedPtr<FJsonValue>& Val : *BoneNamesArray)
+		double PX = NewPos.X, PY = NewPos.Y;
+		(*PosObj)->TryGetNumberField(TEXT("x"), PX);
+		(*PosObj)->TryGetNumberField(TEXT("y"), PY);
+		NewPos = FVector(PX, PY, NewPos.Z);
+		bHasPos = true;
+	}
+	else
+	{
+		double PX = 0, PY = 0;
+		const bool bX = Params->TryGetNumberField(TEXT("x"), PX);
+		const bool bY = Params->TryGetNumberField(TEXT("y"), PY);
+		if (bX || bY)
 		{
-			FString BoneStr;
-			if (Val->TryGetString(BoneStr))
-			{
-				FilterBones.Add(FName(*BoneStr));
-			}
+			NewPos = FVector(bX ? PX : NewPos.X, bY ? PY : NewPos.Y, NewPos.Z);
+			bHasPos = true;
 		}
 	}
 
-	auto Result = MCPSuccess();
-
-	TArray<TSharedPtr<FJsonValue>> BonesArray;
-	for (int32 i = 0; i < RefSkeleton.GetNum(); ++i)
+	BlendSpace->Modify();
+	bool bUpdated = false;
+	if (bHasPos)
 	{
-		FName BoneName = RefSkeleton.GetBoneName(i);
-		if (FilterBones.Num() > 0 && !FilterBones.Contains(BoneName)) continue;
-
-		const FTransform& T = RefPose[i];
-
-		TSharedPtr<FJsonObject> BoneObj = MakeShared<FJsonObject>();
-		BoneObj->SetStringField(TEXT("name"), BoneName.ToString());
-		BoneObj->SetNumberField(TEXT("index"), i);
-		BoneObj->SetNumberField(TEXT("parentIndex"), RefSkeleton.GetParentIndex(i));
-
-		TSharedPtr<FJsonObject> LocObj = MakeShared<FJsonObject>();
-		LocObj->SetNumberField(TEXT("x"), T.GetLocation().X);
-		LocObj->SetNumberField(TEXT("y"), T.GetLocation().Y);
-		LocObj->SetNumberField(TEXT("z"), T.GetLocation().Z);
-		BoneObj->SetObjectField(TEXT("location"), LocObj);
-
-		FQuat Q = T.GetRotation();
-		TSharedPtr<FJsonObject> RotObj = MakeShared<FJsonObject>();
-		RotObj->SetNumberField(TEXT("x"), Q.X);
-		RotObj->SetNumberField(TEXT("y"), Q.Y);
-		RotObj->SetNumberField(TEXT("z"), Q.Z);
-		RotObj->SetNumberField(TEXT("w"), Q.W);
-		BoneObj->SetObjectField(TEXT("rotation"), RotObj);
-
-		TSharedPtr<FJsonObject> ScaleObj = MakeShared<FJsonObject>();
-		ScaleObj->SetNumberField(TEXT("x"), T.GetScale3D().X);
-		ScaleObj->SetNumberField(TEXT("y"), T.GetScale3D().Y);
-		ScaleObj->SetNumberField(TEXT("z"), T.GetScale3D().Z);
-		BoneObj->SetObjectField(TEXT("scale"), ScaleObj);
-
-		BonesArray.Add(MakeShared<FJsonValueObject>(BoneObj));
+		BlendSpace->EditSampleValue(SampleIndex, NewPos);
+		bUpdated = true;
 	}
 
-	Result->SetArrayField(TEXT("bones"), BonesArray);
-	Result->SetNumberField(TEXT("boneCount"), BonesArray.Num());
+	FString NewAnimPath;
+	if (Params->TryGetStringField(TEXT("animation"), NewAnimPath) && !NewAnimPath.IsEmpty())
+	{
+		UAnimSequence* NewAnim = LoadAssetByPath<UAnimSequence>(NewAnimPath);
+		if (!NewAnim)
+		{
+			return MCPError(FString::Printf(TEXT("AnimSequence not found at '%s'"), *NewAnimPath));
+		}
+		BlendSpace->ReplaceSampleAnimation(SampleIndex, NewAnim);
+		bUpdated = true;
+	}
 
+	if (!bUpdated)
+	{
+		return MCPError(TEXT("Nothing to update - provide position {x,y} and/or animation"));
+	}
+
+	BlendSpace->PostEditChange();
+	SaveAssetPackage(BlendSpace);
+
+	const FBlendSample& Updated = BlendSpace->GetBlendSample(SampleIndex);
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("assetPath"), BlendSpace->GetPathName());
+	Result->SetNumberField(TEXT("sampleIndex"), SampleIndex);
+	Result->SetNumberField(TEXT("x"), Updated.SampleValue.X);
+	Result->SetNumberField(TEXT("y"), Updated.SampleValue.Y);
+	if (Updated.Animation)
+	{
+		Result->SetStringField(TEXT("animation"), Updated.Animation->GetPathName());
+	}
 	return MCPResult(Result);
 }
-
-// ---------------------------------------------------------------------------
-// Helper: Set the protected SegmentLength property on an FAnimLinkableElement
-// (e.g. FCompositeSection) via reflection.
-// ---------------------------------------------------------------------------
 static void SetSegmentLength(FAnimLinkableElement& Element, float NewLength)
 {
 	FProperty* Prop = FAnimLinkableElement::StaticStruct()->FindPropertyByName(TEXT("SegmentLength"));
@@ -1492,62 +1232,6 @@ TSharedPtr<FJsonValue> FAnimationHandlers::SetMontageProperties(const TSharedPtr
 
 	return MCPResult(Result);
 }
-TSharedPtr<FJsonValue> FAnimationHandlers::AddCurve(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
-
-	FString CurveName;
-	if (auto Err = RequireString(Params, TEXT("curveName"), CurveName)) return Err;
-
-	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	UAnimSequence* AnimSeq = Cast<UAnimSequence>(LoadedAsset);
-	if (!AnimSeq)
-	{
-		return MCPError(FString::Printf(TEXT("Failed to load AnimSequence at '%s'"), *AssetPath));
-	}
-
-	USkeleton* Skeleton = AnimSeq->GetSkeleton();
-	if (!Skeleton)
-	{
-		return MCPError(TEXT("AnimSequence has no Skeleton"));
-	}
-
-	// Build the curve identifier
-	FAnimationCurveIdentifier CurveId(FName(*CurveName), ERawCurveTrackTypes::RCT_Float);
-
-	IAnimationDataController& Controller = AnimSeq->GetController();
-	Controller.OpenBracket(NSLOCTEXT("MCP", "AddCurve", "MCP Add Curve"));
-
-	bool bAdded = Controller.AddCurve(CurveId, AACF_DefaultCurve);
-
-	Controller.CloseBracket();
-
-	auto Result = MCPSuccess();
-
-	if (!bAdded)
-	{
-		// Curve already exists — idempotent replay
-		MCPSetExisted(Result);
-		Result->SetStringField(TEXT("assetPath"), AssetPath);
-		Result->SetStringField(TEXT("curveName"), CurveName);
-		return MCPResult(Result);
-	}
-
-	MCPSetCreated(Result);
-
-	AnimSeq->MarkPackageDirty();
-	UEditorAssetLibrary::SaveAsset(AssetPath);
-
-	Result->SetStringField(TEXT("assetPath"), AssetPath);
-	Result->SetStringField(TEXT("curveName"), CurveName);
-	// No rollback: no paired remove_curve handler.
-
-	return MCPResult(Result);
-}
-
-// ─── #78  set_montage_slot ──────────────────────────────────────────
-
 TSharedPtr<FJsonValue> FAnimationHandlers::SetMontageSlot(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
@@ -1848,64 +1532,6 @@ TSharedPtr<FJsonValue> FAnimationHandlers::RemoveVirtualBone(const TSharedPtr<FJ
 	// No rollback: removal of a virtual bone is not reversible without source/target capture.
 	return MCPResult(Result);
 }
-
-TSharedPtr<FJsonValue> FAnimationHandlers::CreateAnimComposite(const TSharedPtr<FJsonObject>& Params)
-{
-	FString Name;
-	if (auto Err = RequireString(Params, TEXT("name"), Name)) return Err;
-	FString SkeletonPath;
-	if (auto Err = RequireString(Params, TEXT("skeletonPath"), SkeletonPath)) return Err;
-	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Animations"));
-
-	if (auto Hit = MCPCheckAssetExists(PackagePath, Name, OptionalString(Params, TEXT("onConflict"), TEXT("skip")), TEXT("AnimComposite")))
-	{
-		return Hit;
-	}
-
-	USkeleton* Skeleton = LoadAssetByPath<USkeleton>(SkeletonPath);
-	if (!Skeleton) return MCPError(FString::Printf(TEXT("Skeleton not found: %s"), *SkeletonPath));
-
-	// Manually construct the package so we don't depend on a specialized factory.
-	FString PkgName = PackagePath + TEXT("/") + Name;
-	UPackage* Package = CreatePackage(*PkgName);
-	UAnimComposite* Composite = NewObject<UAnimComposite>(Package, UAnimComposite::StaticClass(), *Name, RF_Public | RF_Standalone);
-	Composite->SetSkeleton(Skeleton);
-	FAssetRegistryModule::AssetCreated(Composite);
-	Composite->MarkPackageDirty();
-	Package->SetDirtyFlag(true);
-	UEditorAssetLibrary::SaveLoadedAsset(Composite);
-
-	TSharedPtr<FJsonObject> Result = MCPSuccess();
-	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), Composite->GetPathName());
-	MCPSetDeleteAssetRollback(Result, Composite->GetPathName());
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FAnimationHandlers::ListAnimModifiers(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
-
-	UAnimSequence* Seq = LoadAssetByPath<UAnimSequence>(AssetPath);
-	if (!Seq) return MCPError(FString::Printf(TEXT("AnimSequence not found: %s"), *AssetPath));
-
-	TArray<TSharedPtr<FJsonValue>> Arr;
-	// AnimationModifiers is an editor-only sub-list stored as AppliedAnimationModifiers
-	// in UE 5.7; surface whatever classes we find via property reflection for portability.
-	FProperty* ModifiersProp = Seq->GetClass()->FindPropertyByName(TEXT("AppliedAnimationModifiers"));
-	if (ModifiersProp)
-	{
-		TSharedPtr<FJsonObject> Info = MakeShared<FJsonObject>();
-		Info->SetStringField(TEXT("note"), TEXT("Property reflection used — full modifier enumeration requires AnimationModifiers module linkage"));
-		Arr.Add(MakeShared<FJsonValueObject>(Info));
-	}
-
-	TSharedPtr<FJsonObject> Result = MCPSuccess();
-	Result->SetStringField(TEXT("assetPath"), AssetPath);
-	Result->SetArrayField(TEXT("modifiers"), Arr);
-	return MCPResult(Result);
-}
 TSharedPtr<FJsonValue> FAnimationHandlers::SetAnimBlueprintSkeleton(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
@@ -1927,322 +1553,5 @@ TSharedPtr<FJsonValue> FAnimationHandlers::SetAnimBlueprintSkeleton(const TShare
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("assetPath"), AssetPath);
 	Result->SetStringField(TEXT("skeletonPath"), SkeletonPath);
-	return MCPResult(Result);
-}
-
-// ─── #112 read_bone_track ─────────────────────────────────────────────
-TSharedPtr<FJsonValue> FAnimationHandlers::ReadBoneTrack(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireString(Params, TEXT("assetPath"), AssetPath)) return Err;
-	FString BoneName;
-	if (auto Err = RequireString(Params, TEXT("boneName"), BoneName)) return Err;
-
-	UAnimSequence* Seq = LoadObject<UAnimSequence>(nullptr, *AssetPath);
-	if (!Seq) return MCPError(FString::Printf(TEXT("AnimSequence not found: %s"), *AssetPath));
-
-	const IAnimationDataModel* DataModel = Seq->GetDataModel();
-	if (!DataModel) return MCPError(TEXT("Sequence has no data model"));
-
-	const int32 NumFrames = DataModel->GetNumberOfFrames();
-	const double FrameRate = DataModel->GetFrameRate().AsDecimal();
-
-	// Frame selection
-	TArray<int32> FramesToSample;
-	const TArray<TSharedPtr<FJsonValue>>* FramesArr = nullptr;
-	if (Params->TryGetArrayField(TEXT("frames"), FramesArr))
-	{
-		for (const auto& V : *FramesArr)
-		{
-			double N = 0;
-			if (V.IsValid() && V->TryGetNumber(N))
-			{
-				FramesToSample.Add(FMath::Clamp((int32)N, 0, NumFrames));
-			}
-		}
-	}
-	else
-	{
-		FramesToSample.Add(0);
-		FramesToSample.Add(NumFrames / 2);
-		FramesToSample.Add(NumFrames);
-	}
-
-	FName BoneFName(*BoneName);
-
-	TArray<TSharedPtr<FJsonValue>> SamplesArr;
-	for (int32 Frame : FramesToSample)
-	{
-		FTransform Xf = DataModel->EvaluateBoneTrackTransform(BoneFName, DataModel->GetFrameRate().AsFrameTime((double)Frame / FrameRate), EAnimInterpolationType::Linear);
-		TSharedPtr<FJsonObject> S = MakeShared<FJsonObject>();
-		S->SetNumberField(TEXT("frame"), Frame);
-		FVector Loc = Xf.GetLocation();
-		TSharedPtr<FJsonObject> L = MakeShared<FJsonObject>();
-		L->SetNumberField(TEXT("x"), Loc.X); L->SetNumberField(TEXT("y"), Loc.Y); L->SetNumberField(TEXT("z"), Loc.Z);
-		S->SetObjectField(TEXT("location"), L);
-		FRotator R = Xf.Rotator();
-		TSharedPtr<FJsonObject> RO = MakeShared<FJsonObject>();
-		RO->SetNumberField(TEXT("pitch"), R.Pitch); RO->SetNumberField(TEXT("yaw"), R.Yaw); RO->SetNumberField(TEXT("roll"), R.Roll);
-		S->SetObjectField(TEXT("rotation"), RO);
-		FVector Sc = Xf.GetScale3D();
-		TSharedPtr<FJsonObject> SO = MakeShared<FJsonObject>();
-		SO->SetNumberField(TEXT("x"), Sc.X); SO->SetNumberField(TEXT("y"), Sc.Y); SO->SetNumberField(TEXT("z"), Sc.Z);
-		S->SetObjectField(TEXT("scale"), SO);
-		SamplesArr.Add(MakeShared<FJsonValueObject>(S));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("assetPath"), AssetPath);
-	Result->SetStringField(TEXT("boneName"), BoneName);
-	Result->SetNumberField(TEXT("numFrames"), NumFrames);
-	Result->SetNumberField(TEXT("frameRate"), FrameRate);
-	Result->SetArrayField(TEXT("samples"), SamplesArr);
-	return MCPResult(Result);
-}
-
-// ===========================================================================
-// v1.0.0-rc.2 — animation authoring gaps
-// ===========================================================================
-
-// #153: batch-set properties on AnimSequence assets, optionally resolving
-// montage inputs to their first underlying sequence. Saves each mutated
-// sequence; returns per-path results so callers can diagnose mixed outcomes.
-TSharedPtr<FJsonValue> FAnimationHandlers::SetSequenceProperties(const TSharedPtr<FJsonObject>& Params)
-{
-	const TArray<TSharedPtr<FJsonValue>>* PathsArr = nullptr;
-	if (!Params->TryGetArrayField(TEXT("assetPaths"), PathsArr))
-	{
-		return MCPError(TEXT("Missing 'assetPaths' array parameter"));
-	}
-
-	const TSharedPtr<FJsonObject>* PropsObj = nullptr;
-	if (!Params->TryGetObjectField(TEXT("properties"), PropsObj) || !PropsObj || !(*PropsObj).IsValid())
-	{
-		return MCPError(TEXT("Missing 'properties' object parameter"));
-	}
-	const TSharedPtr<FJsonObject>& Props = *PropsObj;
-
-	const bool bResolveMontages = OptionalBool(Params, TEXT("resolveFromMontages"), true);
-
-	TArray<TSharedPtr<FJsonValue>> Results;
-	int32 UpdatedCount = 0;
-	int32 SkippedCount = 0;
-
-	for (const TSharedPtr<FJsonValue>& PathVal : *PathsArr)
-	{
-		FString Path;
-		if (!PathVal.IsValid() || !PathVal->TryGetString(Path)) continue;
-
-		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
-		Entry->SetStringField(TEXT("assetPath"), Path);
-
-		UObject* Loaded = UEditorAssetLibrary::LoadAsset(Path);
-		UAnimSequence* Seq = Cast<UAnimSequence>(Loaded);
-		FString ResolvedPath = Path;
-		if (!Seq && bResolveMontages)
-		{
-			if (UAnimMontage* Montage = Cast<UAnimMontage>(Loaded))
-			{
-				UAnimSequenceBase* FirstRef = Montage->GetFirstAnimReference();
-				Seq = Cast<UAnimSequence>(FirstRef);
-				if (Seq)
-				{
-					ResolvedPath = Seq->GetPathName();
-					Entry->SetStringField(TEXT("resolvedFromMontage"), Path);
-					Entry->SetStringField(TEXT("assetPath"), ResolvedPath);
-				}
-			}
-		}
-
-		if (!Seq)
-		{
-			Entry->SetStringField(TEXT("status"), TEXT("skipped"));
-			Entry->SetStringField(TEXT("reason"), TEXT("not an AnimSequence (or no resolvable sequence from montage)"));
-			Results.Add(MakeShared<FJsonValueObject>(Entry));
-			++SkippedCount;
-			continue;
-		}
-
-		Seq->Modify();
-
-		bool EnableRootMotion;
-		if (Props->TryGetBoolField(TEXT("enableRootMotion"), EnableRootMotion))
-		{
-			Seq->bEnableRootMotion = EnableRootMotion;
-		}
-		bool ForceRootLock;
-		if (Props->TryGetBoolField(TEXT("forceRootLock"), ForceRootLock))
-		{
-			Seq->bForceRootLock = ForceRootLock;
-		}
-		bool UseNormalizedRootMotionScale;
-		if (Props->TryGetBoolField(TEXT("useNormalizedRootMotionScale"), UseNormalizedRootMotionScale))
-		{
-			Seq->bUseNormalizedRootMotionScale = UseNormalizedRootMotionScale;
-		}
-		FString RootMotionMode;
-		if (Props->TryGetStringField(TEXT("rootMotionRootLock"), RootMotionMode))
-		{
-			if      (RootMotionMode.Equals(TEXT("RefPose"),        ESearchCase::IgnoreCase)) Seq->RootMotionRootLock = ERootMotionRootLock::RefPose;
-			else if (RootMotionMode.Equals(TEXT("AnimFirstFrame"), ESearchCase::IgnoreCase)) Seq->RootMotionRootLock = ERootMotionRootLock::AnimFirstFrame;
-			else if (RootMotionMode.Equals(TEXT("Zero"),           ESearchCase::IgnoreCase)) Seq->RootMotionRootLock = ERootMotionRootLock::Zero;
-		}
-
-		Seq->PostEditChange();
-		UEditorAssetLibrary::SaveLoadedAsset(Seq, /*bOnlyIfIsDirty=*/false);
-
-		Entry->SetStringField(TEXT("status"), TEXT("updated"));
-		Entry->SetBoolField(TEXT("enableRootMotion"), Seq->bEnableRootMotion);
-		Entry->SetBoolField(TEXT("forceRootLock"), Seq->bForceRootLock);
-		Results.Add(MakeShared<FJsonValueObject>(Entry));
-		++UpdatedCount;
-	}
-
-	auto Result = MCPSuccess();
-	MCPSetUpdated(Result);
-	Result->SetNumberField(TEXT("updated"), UpdatedCount);
-	Result->SetNumberField(TEXT("skipped"), SkippedCount);
-	Result->SetArrayField(TEXT("results"), Results);
-	return MCPResult(Result);
-}
-
-// #154: bake delta translation from a source bone (e.g. pelvis) onto the root
-// bone across the full sequence, compensating the source bone so world-space
-// position is unchanged. Default bakes X/Y (horizontal); Z is typically left
-// on the source bone for gravity. Linear interpolation from frame 0 delta.
-TSharedPtr<FJsonValue> FAnimationHandlers::BakeRootMotionFromBone(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
-
-	FString SourceBoneName;
-	if (auto Err = RequireString(Params, TEXT("sourceBone"), SourceBoneName)) return Err;
-
-	const FString RootBoneName = OptionalString(Params, TEXT("rootBone"), TEXT("root"));
-	const FString InterpMode = OptionalString(Params, TEXT("interpolation"), TEXT("linear"));
-
-	bool bBakeX = true, bBakeY = true, bBakeZ = false;
-	const TArray<TSharedPtr<FJsonValue>>* AxesArr = nullptr;
-	if (Params->TryGetArrayField(TEXT("axes"), AxesArr))
-	{
-		bBakeX = bBakeY = bBakeZ = false;
-		for (const TSharedPtr<FJsonValue>& V : *AxesArr)
-		{
-			FString Ax; if (V.IsValid() && V->TryGetString(Ax))
-			{
-				Ax = Ax.ToLower();
-				if (Ax == TEXT("x")) bBakeX = true;
-				else if (Ax == TEXT("y")) bBakeY = true;
-				else if (Ax == TEXT("z")) bBakeZ = true;
-			}
-		}
-	}
-
-	UAnimSequence* Seq = Cast<UAnimSequence>(UEditorAssetLibrary::LoadAsset(AssetPath));
-	if (!Seq) return MCPError(FString::Printf(TEXT("AnimSequence not found: %s"), *AssetPath));
-
-	USkeleton* Skeleton = Seq->GetSkeleton();
-	if (!Skeleton) return MCPError(TEXT("AnimSequence has no Skeleton"));
-
-	const FReferenceSkeleton& RefSkeleton = Skeleton->GetReferenceSkeleton();
-	const FName SourceFName(*SourceBoneName);
-	const FName RootFName(*RootBoneName);
-	if (RefSkeleton.FindBoneIndex(SourceFName) == INDEX_NONE)
-	{
-		return MCPError(FString::Printf(TEXT("Source bone '%s' not found in skeleton"), *SourceBoneName));
-	}
-	if (RefSkeleton.FindBoneIndex(RootFName) == INDEX_NONE)
-	{
-		return MCPError(FString::Printf(TEXT("Root bone '%s' not found in skeleton"), *RootBoneName));
-	}
-
-	IAnimationDataModel* DataModel = Seq->GetDataModel();
-	if (!DataModel) return MCPError(TEXT("Sequence has no data model"));
-
-	const int32 NumFrames = DataModel->GetNumberOfFrames();
-	const int32 NumKeys = NumFrames + 1;
-	if (NumKeys < 2) return MCPError(TEXT("Sequence must have at least 2 keys to bake root motion"));
-
-	const FFrameRate FrameRate = DataModel->GetFrameRate();
-
-	TArray<FVector> SourceLocIn, SourceLocOut, RootLocOut;
-	TArray<FQuat>   SourceRotIn, RootRotOut;
-	TArray<FVector> SourceSclIn, RootSclOut;
-	SourceLocIn.Reserve(NumKeys); SourceLocOut.Reserve(NumKeys); RootLocOut.Reserve(NumKeys);
-	SourceRotIn.Reserve(NumKeys); RootRotOut.Reserve(NumKeys);
-	SourceSclIn.Reserve(NumKeys); RootSclOut.Reserve(NumKeys);
-
-	for (int32 Key = 0; Key < NumKeys; ++Key)
-	{
-		const FFrameTime FT = FrameRate.AsFrameTime((double)Key / FrameRate.AsDecimal());
-		const FTransform Xf = DataModel->EvaluateBoneTrackTransform(SourceFName, FT, EAnimInterpolationType::Linear);
-		SourceLocIn.Add(Xf.GetLocation());
-		SourceRotIn.Add(Xf.GetRotation());
-		SourceSclIn.Add(Xf.GetScale3D());
-	}
-
-	const FVector StartLoc = SourceLocIn[0];
-	const FVector EndLoc = SourceLocIn.Last();
-	const FVector TotalDelta(
-		bBakeX ? (EndLoc.X - StartLoc.X) : 0.0,
-		bBakeY ? (EndLoc.Y - StartLoc.Y) : 0.0,
-		bBakeZ ? (EndLoc.Z - StartLoc.Z) : 0.0);
-
-	const bool bPerFrame = InterpMode.Equals(TEXT("per_frame"), ESearchCase::IgnoreCase);
-
-	for (int32 Key = 0; Key < NumKeys; ++Key)
-	{
-		FVector RootDelta = FVector::ZeroVector;
-		if (bPerFrame)
-		{
-			const FVector Cur = SourceLocIn[Key] - StartLoc;
-			RootDelta = FVector(bBakeX ? Cur.X : 0.0, bBakeY ? Cur.Y : 0.0, bBakeZ ? Cur.Z : 0.0);
-		}
-		else
-		{
-			const double T = (NumKeys > 1) ? ((double)Key / (double)(NumKeys - 1)) : 0.0;
-			RootDelta = TotalDelta * T;
-		}
-		RootLocOut.Add(RootDelta);
-		RootRotOut.Add(FQuat::Identity);
-		RootSclOut.Add(FVector::OneVector);
-
-		FVector SrcLoc = SourceLocIn[Key];
-		if (bBakeX) SrcLoc.X -= RootDelta.X;
-		if (bBakeY) SrcLoc.Y -= RootDelta.Y;
-		if (bBakeZ) SrcLoc.Z -= RootDelta.Z;
-		SourceLocOut.Add(SrcLoc);
-	}
-
-	IAnimationDataController& Controller = Seq->GetController();
-	Controller.OpenBracket(NSLOCTEXT("MCP", "BakeRootMotion", "Bake Root Motion From Bone"));
-
-	if (!DataModel->IsValidBoneTrackName(RootFName)) Controller.AddBoneCurve(RootFName);
-	if (!DataModel->IsValidBoneTrackName(SourceFName)) Controller.AddBoneCurve(SourceFName);
-
-	Controller.SetBoneTrackKeys(RootFName, RootLocOut, RootRotOut, RootSclOut);
-	Controller.SetBoneTrackKeys(SourceFName, SourceLocOut, SourceRotIn, SourceSclIn);
-
-	Controller.CloseBracket(false);
-
-	GEditor->ResetTransaction(NSLOCTEXT("MCP", "BakeRootMotionReset", "Bake Root Motion Complete"));
-
-	Seq->bEnableRootMotion = true;
-	Seq->PostEditChange();
-	Seq->MarkPackageDirty();
-	UEditorAssetLibrary::SaveLoadedAsset(Seq, /*bOnlyIfIsDirty=*/false);
-
-	auto Result = MCPSuccess();
-	MCPSetUpdated(Result);
-	Result->SetStringField(TEXT("assetPath"), AssetPath);
-	Result->SetStringField(TEXT("sourceBone"), SourceBoneName);
-	Result->SetStringField(TEXT("rootBone"), RootBoneName);
-	Result->SetNumberField(TEXT("keys"), NumKeys);
-	TSharedPtr<FJsonObject> Delta = MakeShared<FJsonObject>();
-	Delta->SetNumberField(TEXT("x"), TotalDelta.X);
-	Delta->SetNumberField(TEXT("y"), TotalDelta.Y);
-	Delta->SetNumberField(TEXT("z"), TotalDelta.Z);
-	Result->SetObjectField(TEXT("totalDelta"), Delta);
-	Result->SetStringField(TEXT("interpolation"), bPerFrame ? TEXT("per_frame") : TEXT("linear"));
 	return MCPResult(Result);
 }

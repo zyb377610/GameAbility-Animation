@@ -1,6 +1,7 @@
 #include "AudioHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerAssetCreate.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
@@ -72,40 +73,17 @@ TSharedPtr<FJsonValue> FAudioHandlers::CreateSoundCue(const TSharedPtr<FJsonObje
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Audio/SoundCues"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	const FString ProbePath = PackagePath + TEXT("/") + Name + TEXT(".") + Name;
-	if (USoundCue* Existing = LoadObject<USoundCue>(nullptr, *ProbePath))
-	{
-		if (OnConflict == TEXT("error"))
-		{
-			return MCPError(FString::Printf(TEXT("SoundCue '%s' already exists"), *ProbePath));
-		}
-		auto Res = MCPSuccess();
-		MCPSetExisted(Res);
-		Res->SetStringField(TEXT("path"), Existing->GetPathName());
-		Res->SetStringField(TEXT("name"), Name);
-		return MCPResult(Res);
-	}
-
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
 	USoundCueFactoryNew* SoundCueFactory = NewObject<USoundCueFactoryNew>();
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, USoundCue::StaticClass(), SoundCueFactory);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create SoundCue"));
-	}
+	auto Created = MCPCreateAssetIdempotent<USoundCue>(Name, PackagePath, OnConflict, TEXT("SoundCue"), SoundCueFactory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-
-	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("assetPath"), NewAsset->GetPathName());
-	MCPSetRollback(Result, TEXT("delete_asset"), Payload);
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 
 	return MCPResult(Result);
 }
@@ -124,39 +102,16 @@ TSharedPtr<FJsonValue> FAudioHandlers::CreateMetaSoundSource(const TSharedPtr<FJ
 		return MCPError(TEXT("MetaSoundSource class not found. Enable MetaSound plugin."));
 	}
 
-	const FString ProbePath = PackagePath + TEXT("/") + Name + TEXT(".") + Name;
-	if (UObject* Existing = LoadObject<UObject>(nullptr, *ProbePath))
-	{
-		if (OnConflict == TEXT("error"))
-		{
-			return MCPError(FString::Printf(TEXT("MetaSoundSource '%s' already exists"), *ProbePath));
-		}
-		auto Res = MCPSuccess();
-		MCPSetExisted(Res);
-		Res->SetStringField(TEXT("path"), Existing->GetPathName());
-		Res->SetStringField(TEXT("name"), Name);
-		return MCPResult(Res);
-	}
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("MetaSoundSource"), MetaSoundSourceClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, MetaSoundSourceClass, nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create MetaSoundSource"));
-	}
-
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-
-	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("assetPath"), NewAsset->GetPathName());
-	MCPSetRollback(Result, TEXT("delete_asset"), Payload);
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 
 	return MCPResult(Result);
 }
@@ -177,15 +132,7 @@ TSharedPtr<FJsonValue> FAudioHandlers::PlaySoundAtLocation(const TSharedPtr<FJso
 	// Get the editor world
 	REQUIRE_EDITOR_WORLD(World);
 
-	// Parse location from JSON object (defaults to origin)
-	FVector Location = FVector::ZeroVector;
-	const TSharedPtr<FJsonObject>* LocationObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("location"), LocationObj))
-	{
-		(*LocationObj)->TryGetNumberField(TEXT("x"), Location.X);
-		(*LocationObj)->TryGetNumberField(TEXT("y"), Location.Y);
-		(*LocationObj)->TryGetNumberField(TEXT("z"), Location.Z);
-	}
+	const FVector Location = OptionalVec3(Params, TEXT("location"));
 
 	// Parse optional volume and pitch multipliers (accept both short and long names)
 	double Volume = 1.0;
@@ -221,34 +168,12 @@ TSharedPtr<FJsonValue> FAudioHandlers::SpawnAmbientSound(const TSharedPtr<FJsonO
 	const FString Label = OptionalString(Params, TEXT("label"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (!Label.IsEmpty())
+	if (auto Existing = MCPCheckActorLabelExists(World, Label, OnConflict, TEXT("AmbientSound")))
 	{
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			if (It->GetActorLabel() == Label)
-			{
-				if (OnConflict == TEXT("error"))
-				{
-					return MCPError(FString::Printf(TEXT("AmbientSound '%s' already exists"), *Label));
-				}
-				auto Existing = MCPSuccess();
-				MCPSetExisted(Existing);
-				Existing->SetStringField(TEXT("label"), Label);
-				Existing->SetStringField(TEXT("assetPath"), SoundPath);
-				return MCPResult(Existing);
-			}
-		}
+		return Existing;
 	}
 
-	FVector Location = FVector::ZeroVector;
-	const TSharedPtr<FJsonObject>* LocationObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("location"), LocationObj))
-	{
-		(*LocationObj)->TryGetNumberField(TEXT("x"), Location.X);
-		(*LocationObj)->TryGetNumberField(TEXT("y"), Location.Y);
-		(*LocationObj)->TryGetNumberField(TEXT("z"), Location.Z);
-	}
-
+	const FVector Location = OptionalVec3(Params, TEXT("location"));
 	FTransform SpawnTransform(FRotator::ZeroRotator, Location);
 	AAmbientSound* AmbientSoundActor = World->SpawnActor<AAmbientSound>(AAmbientSound::StaticClass(), SpawnTransform);
 	if (!AmbientSoundActor)

@@ -6,6 +6,7 @@
 #include "AssetHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerAssetCreate.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 #include "AssetImportTask.h"
@@ -42,91 +43,6 @@
 #include "Factories/DataTableFactory.h"
 #include "Exporters/Exporter.h"
 #include "AssetExportTask.h"
-
-
-// ============================================================================
-// DataTable handlers
-// ============================================================================
-
-TSharedPtr<FJsonValue> FAssetHandlers::ImportDataTableJson(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
-
-	FString JsonString;
-	if (auto Err = RequireString(Params, TEXT("jsonString"), JsonString)) return Err;
-
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
-	}
-
-	UDataTable* DataTable = Cast<UDataTable>(Asset);
-	if (!DataTable)
-	{
-		return MCPError(FString::Printf(TEXT("Asset is not a DataTable: %s"), *AssetPath));
-	}
-
-	TArray<FString> Errors = DataTable->CreateTableFromJSONString(JsonString);
-
-	if (Errors.Num() > 0)
-	{
-		TArray<TSharedPtr<FJsonValue>> ErrorsArray;
-		for (const FString& Error : Errors)
-		{
-			ErrorsArray.Add(MakeShared<FJsonValueString>(Error));
-		}
-		TSharedPtr<FJsonObject> ErrResult = MakeShared<FJsonObject>();
-		ErrResult->SetBoolField(TEXT("success"), false);
-		ErrResult->SetArrayField(TEXT("errors"), ErrorsArray);
-		ErrResult->SetStringField(TEXT("error"), FString::Printf(TEXT("Import completed with %d error(s)"), Errors.Num()));
-		return MCPResult(ErrResult);
-	}
-
-	DataTable->MarkPackageDirty();
-
-	auto Result = MCPSuccess();
-	MCPSetUpdated(Result);
-	Result->SetStringField(TEXT("assetPath"), AssetPath);
-	Result->SetNumberField(TEXT("rowCount"), DataTable->GetRowMap().Num());
-	Result->SetStringField(TEXT("message"), TEXT("DataTable imported successfully from JSON"));
-	// No rollback: destructive — import replaces table contents.
-
-	return MCPResult(Result);
-}
-
-
-TSharedPtr<FJsonValue> FAssetHandlers::ExportDataTableJson(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
-
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
-	}
-
-	UDataTable* DataTable = Cast<UDataTable>(Asset);
-	if (!DataTable)
-	{
-		return MCPError(FString::Printf(TEXT("Asset is not a DataTable: %s"), *AssetPath));
-	}
-
-	FString JsonString = DataTable->GetTableAsJSON(EDataTableExportFlags::UseJsonObjectsForStructs);
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("assetPath"), AssetPath);
-	Result->SetStringField(TEXT("json"), JsonString);
-	Result->SetNumberField(TEXT("rowCount"), DataTable->GetRowMap().Num());
-
-	return MCPResult(Result);
-}
-
-// ============================================================================
-// FBX import handlers
-// ============================================================================
 
 
 // ============================================================================
@@ -719,6 +635,122 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetTextureProperties(const TSharedPtr<FJs
 }
 
 
+// #430: single-call batch of texture imports. Wraps N AssetImportTasks in one
+// ImportAssetTasks call so the loop stays inside the editor (no per-import
+// bridge round-trip). Per-item result records mirror what import_texture
+// would have returned for each individual call.
+TSharedPtr<FJsonValue> FAssetHandlers::ImportTextureBatch(const TSharedPtr<FJsonObject>& Params)
+{
+	const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
+	if (!Params->TryGetArrayField(TEXT("items"), Items) || !Items)
+	{
+		return MCPError(TEXT("Missing 'items' array. Each entry: { filePath, packagePath?, name?, replaceExisting? }"));
+	}
+
+	const bool bSave = OptionalBool(Params, TEXT("save"), true);
+	const bool bAutomated = OptionalBool(Params, TEXT("automated"), true);
+	const FString DefaultPackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Textures"));
+
+	TArray<UAssetImportTask*> Tasks;
+	TArray<FGCRootScope*> Roots;
+	TArray<TSharedPtr<FJsonObject>> ItemRecords;
+	Tasks.Reserve(Items->Num());
+	ItemRecords.Reserve(Items->Num());
+
+	for (const TSharedPtr<FJsonValue>& Entry : *Items)
+	{
+		TSharedPtr<FJsonObject> Obj = Entry.IsValid() ? Entry->AsObject() : nullptr;
+		TSharedPtr<FJsonObject> Rec = MakeShared<FJsonObject>();
+		ItemRecords.Add(Rec);
+		if (!Obj.IsValid())
+		{
+			Rec->SetBoolField(TEXT("success"), false);
+			Rec->SetStringField(TEXT("error"), TEXT("Entry is not an object"));
+			continue;
+		}
+		FString FilePath;
+		if (!Obj->TryGetStringField(TEXT("filePath"), FilePath) || FilePath.IsEmpty())
+		{
+			Rec->SetBoolField(TEXT("success"), false);
+			Rec->SetStringField(TEXT("error"), TEXT("Missing 'filePath'"));
+			continue;
+		}
+		if (!FPaths::FileExists(FilePath))
+		{
+			Rec->SetBoolField(TEXT("success"), false);
+			Rec->SetStringField(TEXT("filePath"), FilePath);
+			Rec->SetStringField(TEXT("error"), FString::Printf(TEXT("File not found: %s"), *FilePath));
+			continue;
+		}
+
+		FString PkgPath = DefaultPackagePath;
+		Obj->TryGetStringField(TEXT("packagePath"), PkgPath);
+		FString AssetName;
+		Obj->TryGetStringField(TEXT("name"), AssetName);
+		bool bReplaceExisting = true;
+		Obj->TryGetBoolField(TEXT("replaceExisting"), bReplaceExisting);
+
+		UTextureFactory* Factory = NewObject<UTextureFactory>();
+		UAssetImportTask* Task = NewObject<UAssetImportTask>();
+		Roots.Add(new FGCRootScope(Factory));
+		Roots.Add(new FGCRootScope(Task));
+		Task->bAutomated = bAutomated;
+		Task->bReplaceExisting = bReplaceExisting;
+		Task->bSave = bSave;
+		Task->Filename = FilePath;
+		Task->DestinationPath = PkgPath;
+		if (!AssetName.IsEmpty()) Task->DestinationName = AssetName;
+		Task->Factory = Factory;
+
+		Rec->SetStringField(TEXT("filePath"), FilePath);
+		Rec->SetStringField(TEXT("packagePath"), PkgPath);
+		if (!AssetName.IsEmpty()) Rec->SetStringField(TEXT("name"), AssetName);
+		Tasks.Add(Task);
+	}
+
+	if (Tasks.Num() > 0)
+	{
+		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+		AssetToolsModule.Get().ImportAssetTasks(Tasks);
+	}
+
+	// Map task results back to records by index.
+	int32 Imported = 0;
+	int32 TaskIdx = 0;
+	for (TSharedPtr<FJsonObject>& Rec : ItemRecords)
+	{
+		bool bAlreadyFailed = false;
+		Rec->TryGetBoolField(TEXT("success"), bAlreadyFailed);
+		if (bAlreadyFailed == false && Rec->HasField(TEXT("error"))) continue; // validation rejection
+		if (TaskIdx >= Tasks.Num()) break;
+		UAssetImportTask* Task = Tasks[TaskIdx++];
+		TArray<TSharedPtr<FJsonValue>> ImportedPaths;
+		for (UObject* Imported2 : Task->GetObjects())
+		{
+			if (Imported2) ImportedPaths.Add(MakeShared<FJsonValueString>(Imported2->GetPathName()));
+		}
+		Rec->SetArrayField(TEXT("importedAssets"), ImportedPaths);
+		Rec->SetBoolField(TEXT("success"), ImportedPaths.Num() > 0);
+		if (ImportedPaths.Num() > 0) Imported++;
+	}
+
+	for (FGCRootScope* G : Roots) delete G;
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetNumberField(TEXT("requested"), Items->Num());
+	Result->SetNumberField(TEXT("imported"), Imported);
+	Result->SetNumberField(TEXT("failed"), Items->Num() - Imported);
+
+	TArray<TSharedPtr<FJsonValue>> RecArray;
+	for (const TSharedPtr<FJsonObject>& Rec : ItemRecords)
+	{
+		RecArray.Add(MakeShared<FJsonValueObject>(Rec));
+	}
+	Result->SetArrayField(TEXT("items"), RecArray);
+	return MCPResult(Result);
+}
+
 TSharedPtr<FJsonValue> FAssetHandlers::ImportTexture(const TSharedPtr<FJsonObject>& Params)
 {
 	FString FileName;
@@ -827,34 +859,11 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateDataTable(const TSharedPtr<FJsonObj
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/DataTables"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	// Idempotency: check if the DataTable already exists at the target path.
-	const FString ProbePath = PackagePath + TEXT("/") + Name + TEXT(".") + Name;
-	if (UDataTable* Existing = LoadObject<UDataTable>(nullptr, *ProbePath))
-	{
-		if (OnConflict == TEXT("error"))
-		{
-			return MCPError(FString::Printf(TEXT("DataTable '%s' already exists"), *ProbePath));
-		}
-		auto ExistingResult = MCPSuccess();
-		MCPSetExisted(ExistingResult);
-		ExistingResult->SetStringField(TEXT("name"), Name);
-		ExistingResult->SetStringField(TEXT("packagePath"), PackagePath);
-		ExistingResult->SetStringField(TEXT("assetPath"), Existing->GetPathName());
-		ExistingResult->SetStringField(TEXT("rowStruct"), Existing->RowStruct ? Existing->RowStruct->GetName() : TEXT(""));
-		ExistingResult->SetNumberField(TEXT("rowCount"), Existing->GetRowMap().Num());
-		return MCPResult(ExistingResult);
-	}
-
 	// Find the row struct type
 	UScriptStruct* ScriptStruct = nullptr;
-
-	// First try as a full path
 	ScriptStruct = LoadObject<UScriptStruct>(nullptr, *RowStruct);
-
-	// If not found, try finding by short name
 	if (!ScriptStruct)
 	{
-		// Try common patterns: search for the struct by name in all packages
 		for (TObjectIterator<UScriptStruct> It; It; ++It)
 		{
 			if (It->GetName() == RowStruct)
@@ -864,27 +873,37 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateDataTable(const TSharedPtr<FJsonObj
 			}
 		}
 	}
-
 	if (!ScriptStruct)
 	{
 		return MCPError(FString::Printf(TEXT("Row struct not found: %s"), *RowStruct));
 	}
 
-	// Create the DataTable asset
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
 	UDataTableFactory* Factory = NewObject<UDataTableFactory>();
 	Factory->Struct = ScriptStruct;
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, UDataTable::StaticClass(), Factory);
-	if (!NewAsset)
+	auto Created = MCPCreateAssetIdempotent<UDataTable>(Name, PackagePath, OnConflict, TEXT("DataTable"), Factory);
+	if (Created.EarlyReturn)
 	{
-		return MCPError(FString::Printf(TEXT("Failed to create DataTable: %s/%s"), *PackagePath, *Name));
+		// Augment the Existed payload with DataTable-specific fields if it was an idempotency hit.
+		if (TSharedPtr<FJsonObject> ExistingObj = Created.EarlyReturn->AsObject())
+		{
+			bool bExisted = false;
+			if (ExistingObj->TryGetBoolField(TEXT("existed"), bExisted) && bExisted)
+			{
+				FString ExistingAssetPath;
+				ExistingObj->TryGetStringField(TEXT("path"), ExistingAssetPath);
+				if (UDataTable* Existing = LoadObject<UDataTable>(nullptr, *ExistingAssetPath))
+				{
+					ExistingObj->SetStringField(TEXT("assetPath"), Existing->GetPathName());
+					ExistingObj->SetStringField(TEXT("rowStruct"), Existing->RowStruct ? Existing->RowStruct->GetName() : TEXT(""));
+					ExistingObj->SetNumberField(TEXT("rowCount"), Existing->GetRowMap().Num());
+				}
+			}
+		}
+		return Created.EarlyReturn;
 	}
-
-	UDataTable* DataTable = Cast<UDataTable>(NewAsset);
-	const FString AssetPath = NewAsset->GetPathName();
+	UDataTable* DataTable = Created.Asset;
+	const FString AssetPath = DataTable->GetPathName();
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);

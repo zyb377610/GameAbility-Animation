@@ -1,6 +1,8 @@
 #include "GameplayHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerJsonProperty.h"
+#include "HandlerAssetCreate.h"
 #include "EditorScriptingUtilities/Public/EditorAssetLibrary.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
@@ -17,6 +19,7 @@
 #include "Engine/LocalPlayer.h"
 #include "Editor.h"
 #include "NavigationSystem.h"
+#include "NavigationPath.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/GameStateBase.h"
@@ -99,22 +102,13 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_player_controller"), &CreatePlayerController);
 	Registry.RegisterHandler(TEXT("create_player_state"), &CreatePlayerState);
 	Registry.RegisterHandler(TEXT("create_hud"), &CreateHud);
-	Registry.RegisterHandler(TEXT("set_collision_profile"), &SetCollisionProfile);
-	Registry.RegisterHandler(TEXT("set_physics_enabled"), &SetPhysicsEnabled);
-	Registry.RegisterHandler(TEXT("set_collision_type"), &SetCollisionType);
-	Registry.RegisterHandler(TEXT("set_body_properties"), &SetBodyProperties);
 	Registry.RegisterHandler(TEXT("spawn_nav_modifier_volume"), &SpawnNavModifierVolume);
-	Registry.RegisterHandler(TEXT("rebuild_navmesh"), &RebuildNavmesh);
-	Registry.RegisterHandler(TEXT("get_cdo_defaults"), &GetCdoDefaults);
 	Registry.RegisterHandler(TEXT("set_world_game_mode"), &SetWorldGameMode);
-	Registry.RegisterHandler(TEXT("create_ai_perception_config"), &CreateAiPerceptionConfig);
 	Registry.RegisterHandler(TEXT("add_blackboard_key"), &AddBlackboardKey);
-	Registry.RegisterHandler(TEXT("setup_enhanced_input"), &SetupEnhancedInput);
-	Registry.RegisterHandler(TEXT("configure_behavior_tree"), &ConfigureBehaviorTree);
-	Registry.RegisterHandler(TEXT("setup_path_following"), &SetupPathFollowing);
-	Registry.RegisterHandler(TEXT("run_eqs_query"), &RunEqsQuery);
-	// Aliases
+	Registry.RegisterHandler(TEXT("set_behavior_tree_blackboard"), &SetBehaviorTreeBlackboard);
 	Registry.RegisterHandler(TEXT("rebuild_navigation"), &RebuildNavmesh);
+	Registry.RegisterHandler(TEXT("find_nav_path"), &FindNavPath);
+	Registry.RegisterHandler(TEXT("list_nav_invokers"), &ListNavInvokers);
 	// New handlers
 	Registry.RegisterHandler(TEXT("get_behavior_tree_info"), &GetBehaviorTreeInfo);
 	Registry.RegisterHandler(TEXT("read_behavior_tree_graph"), &ReadBehaviorTreeGraph);
@@ -122,6 +116,11 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("configure_ai_perception_sense"), &ConfigureAiPerceptionSense);
 	Registry.RegisterHandler(TEXT("add_state_tree_component"), &AddStateTreeComponent);
 	Registry.RegisterHandler(TEXT("add_smart_object_component"), &AddSmartObjectComponent);
+	Registry.RegisterHandler(TEXT("add_smart_object_slot"), &AddSmartObjectSlot);
+	Registry.RegisterHandler(TEXT("set_smart_object_slot"), &SetSmartObjectSlot);
+	Registry.RegisterHandler(TEXT("remove_smart_object_slot"), &RemoveSmartObjectSlot);
+	Registry.RegisterHandler(TEXT("list_smart_object_slots"), &ListSmartObjectSlots);
+	Registry.RegisterHandler(TEXT("add_smart_object_slot_behavior"), &AddSmartObjectSlotBehavior);
 	Registry.RegisterHandler(TEXT("read_imc"), &ReadImc);
 	Registry.RegisterHandler(TEXT("list_imc_mappings"), &ReadImc);
 	Registry.RegisterHandler(TEXT("add_imc_mapping"), &AddImcMapping);
@@ -135,6 +134,25 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("get_pie_subsystem_state"), &GetPieSubsystemState);
 	Registry.RegisterHandler(TEXT("get_navmesh_details"), &GetNavmeshDetails);
 	Registry.RegisterHandler(TEXT("apply_damage_in_pie"), &ApplyDamageInPie);
+	Registry.RegisterHandler(TEXT("inject_input"), &InjectInput);
+	Registry.RegisterHandler(TEXT("inject_input_start"), &InjectInputStart);
+	Registry.RegisterHandler(TEXT("inject_input_update"), &InjectInputUpdate);
+	Registry.RegisterHandler(TEXT("inject_input_stop"), &InjectInputStop);
+	Registry.RegisterHandler(TEXT("inject_input_tape"), &InjectInputTape);
+	Registry.RegisterHandler(TEXT("pie_record_arm"), &PieRecordArm);
+	Registry.RegisterHandler(TEXT("pie_record_disarm"), &PieRecordDisarm);
+	Registry.RegisterHandler(TEXT("pie_record_stop"), &PieRecordStop);
+	Registry.RegisterHandler(TEXT("pie_record_status"), &PieRecordStatus);
+	Registry.RegisterHandler(TEXT("pie_record_list"), &PieRecordList);
+	Registry.RegisterHandler(TEXT("pie_record_read"), &PieRecordRead);
+	Registry.RegisterHandler(TEXT("pie_record_delete"), &PieRecordDelete);
+	Registry.RegisterHandler(TEXT("pie_mark"), &PieMark);
+	Registry.RegisterHandler(TEXT("pie_replay_arm"), &PieReplayArm);
+	Registry.RegisterHandler(TEXT("pie_replay_disarm"), &PieReplayDisarm);
+	Registry.RegisterHandler(TEXT("pie_replay_stop"), &PieReplayStop);
+	Registry.RegisterHandler(TEXT("pie_replay_status"), &PieReplayStatus);
+	Registry.RegisterHandler(TEXT("pie_record_diff"), &PieRecordDiff);
+	Registry.RegisterHandler(TEXT("pie_snapshot"), &PieSnapshot);
 }
 
 TSharedPtr<FJsonValue> FGameplayHandlers::CreateSmartObjectDefinition(const TSharedPtr<FJsonObject>& Params)
@@ -145,34 +163,320 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateSmartObjectDefinition(const TSha
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/AI/SmartObjects"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("SmartObjectDefinition")))
-	{
-		return Existing;
-	}
-
 	UClass* SmartObjectDefClass = FindObject<UClass>(nullptr, TEXT("/Script/SmartObjectsModule.SmartObjectDefinition"));
 	if (!SmartObjectDefClass)
 	{
 		return MCPError(TEXT("SmartObjectDefinition class not found. Enable SmartObjects plugin."));
 	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("SmartObjectDefinition"), SmartObjectDefClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, SmartObjectDefClass, nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create SmartObjectDefinition"));
-	}
-
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 
+	return MCPResult(Result);
+}
+
+// ── #416: SmartObject slot authoring (reflection-only) ────────────────
+
+namespace
+{
+	// Load a USmartObjectDefinition by asset path and locate its Slots TArray
+	// property. Returns: the asset, the array property, and a writable script
+	// array helper. Uses pure reflection so we don't have to depend on the
+	// SmartObjectsModule at build time.
+	struct FSlotsAccess
+	{
+		UObject* Asset = nullptr;
+		FArrayProperty* SlotsProp = nullptr;
+		FStructProperty* SlotStruct = nullptr;
+		void* ArrayAddr = nullptr;
+	};
+
+	static TSharedPtr<FJsonValue> ResolveSlots(const TSharedPtr<FJsonObject>& Params, FSlotsAccess& Out)
+	{
+		FString AssetPath;
+		if (auto Err = RequireString(Params, TEXT("assetPath"), AssetPath)) return Err;
+		UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
+		if (!Asset) return MCPError(FString::Printf(TEXT("SmartObjectDefinition not found: %s"), *AssetPath));
+		UClass* Cls = Asset->GetClass();
+		if (Cls->GetName() != TEXT("SmartObjectDefinition"))
+		{
+			return MCPError(FString::Printf(TEXT("Asset '%s' is %s, not a SmartObjectDefinition"), *AssetPath, *Cls->GetName()));
+		}
+		FProperty* Prop = Cls->FindPropertyByName(FName(TEXT("Slots")));
+		FArrayProperty* ArrProp = CastField<FArrayProperty>(Prop);
+		if (!ArrProp)
+		{
+			return MCPError(TEXT("SmartObjectDefinition has no 'Slots' TArray property (engine layout changed?)"));
+		}
+		FStructProperty* SlotStruct = CastField<FStructProperty>(ArrProp->Inner);
+		if (!SlotStruct)
+		{
+			return MCPError(TEXT("Slots inner is not a struct"));
+		}
+		Out.Asset = Asset;
+		Out.SlotsProp = ArrProp;
+		Out.SlotStruct = SlotStruct;
+		Out.ArrayAddr = ArrProp->ContainerPtrToValuePtr<void>(Asset);
+		return nullptr;
+	}
+
+	// Apply optional offset/rotation/tags JSON fields onto a slot struct in place.
+	static FString ApplySlotFieldsFromJson(FStructProperty* SlotStruct, void* SlotAddr, const TSharedPtr<FJsonObject>& Src)
+	{
+		auto SetField = [&](const TCHAR* PropName, const TSharedPtr<FJsonValue>& Val) -> FString
+		{
+			FProperty* P = SlotStruct->Struct->FindPropertyByName(FName(PropName));
+			if (!P) return FString::Printf(TEXT("Slot has no '%s'"), PropName);
+			void* PV = P->ContainerPtrToValuePtr<void>(SlotAddr);
+			FString E;
+			if (!MCPJsonProperty::SetJsonOnProperty(P, PV, Val, E))
+			{
+				return FString::Printf(TEXT("Failed to set '%s': %s"), PropName, *E);
+			}
+			return FString();
+		};
+		const TSharedPtr<FJsonObject>* SubObj = nullptr;
+		FString Err;
+		if (Src->TryGetObjectField(TEXT("offset"), SubObj))
+		{
+			Err = SetField(TEXT("Offset"), MakeShared<FJsonValueObject>(*SubObj));
+			if (!Err.IsEmpty()) return Err;
+		}
+		if (Src->TryGetObjectField(TEXT("rotation"), SubObj))
+		{
+			Err = SetField(TEXT("Rotation"), MakeShared<FJsonValueObject>(*SubObj));
+			if (!Err.IsEmpty()) return Err;
+		}
+		const TArray<TSharedPtr<FJsonValue>>* TagArr = nullptr;
+		if (Src->TryGetArrayField(TEXT("tags"), TagArr) && TagArr)
+		{
+			Err = SetField(TEXT("RuntimeTags"), MakeShared<FJsonValueArray>(*TagArr));
+			if (!Err.IsEmpty()) return Err;
+		}
+		FString NameStr;
+		if (Src->TryGetStringField(TEXT("name"), NameStr))
+		{
+			FProperty* P = SlotStruct->Struct->FindPropertyByName(FName(TEXT("Name")));
+			if (P)
+			{
+				FNameProperty* NP = CastField<FNameProperty>(P);
+				if (NP) NP->SetPropertyValue(NP->ContainerPtrToValuePtr<void>(SlotAddr), FName(*NameStr));
+			}
+		}
+		return FString();
+	}
+}
+
+TSharedPtr<FJsonValue> FGameplayHandlers::AddSmartObjectSlot(const TSharedPtr<FJsonObject>& Params)
+{
+	FSlotsAccess SA;
+	if (auto Err = ResolveSlots(Params, SA)) return Err;
+	SA.Asset->Modify();
+	FScriptArrayHelper Helper(SA.SlotsProp, SA.ArrayAddr);
+	const int32 NewIdx = Helper.AddValue();
+	void* SlotAddr = Helper.GetRawPtr(NewIdx);
+	const FString ApplyErr = ApplySlotFieldsFromJson(SA.SlotStruct, SlotAddr, Params);
+	if (!ApplyErr.IsEmpty())
+	{
+		Helper.RemoveValues(NewIdx, 1);
+		return MCPError(ApplyErr);
+	}
+	SA.Asset->PostEditChange();
+	SA.Asset->MarkPackageDirty();
+	UEditorAssetLibrary::SaveAsset(SA.Asset->GetPathName());
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("assetPath"), SA.Asset->GetPathName());
+	Result->SetNumberField(TEXT("slotIndex"), NewIdx);
+	Result->SetNumberField(TEXT("slotCount"), Helper.Num());
+
+	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("assetPath"), SA.Asset->GetPathName());
+	Payload->SetNumberField(TEXT("slotIndex"), NewIdx);
+	MCPSetRollback(Result, TEXT("remove_smart_object_slot"), Payload);
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FGameplayHandlers::SetSmartObjectSlot(const TSharedPtr<FJsonObject>& Params)
+{
+	FSlotsAccess SA;
+	if (auto Err = ResolveSlots(Params, SA)) return Err;
+	int32 SlotIdx = -1;
+	if (!Params->TryGetNumberField(TEXT("slotIndex"), SlotIdx) || SlotIdx < 0)
+	{
+		return MCPError(TEXT("Missing 'slotIndex' (non-negative integer)"));
+	}
+	FScriptArrayHelper Helper(SA.SlotsProp, SA.ArrayAddr);
+	if (SlotIdx >= Helper.Num())
+	{
+		return MCPError(FString::Printf(TEXT("slotIndex %d out of range (0-%d)"), SlotIdx, Helper.Num() - 1));
+	}
+	SA.Asset->Modify();
+	void* SlotAddr = Helper.GetRawPtr(SlotIdx);
+	const FString ApplyErr = ApplySlotFieldsFromJson(SA.SlotStruct, SlotAddr, Params);
+	if (!ApplyErr.IsEmpty()) return MCPError(ApplyErr);
+	SA.Asset->PostEditChange();
+	SA.Asset->MarkPackageDirty();
+	UEditorAssetLibrary::SaveAsset(SA.Asset->GetPathName());
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("assetPath"), SA.Asset->GetPathName());
+	Result->SetNumberField(TEXT("slotIndex"), SlotIdx);
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FGameplayHandlers::RemoveSmartObjectSlot(const TSharedPtr<FJsonObject>& Params)
+{
+	FSlotsAccess SA;
+	if (auto Err = ResolveSlots(Params, SA)) return Err;
+	int32 SlotIdx = -1;
+	if (!Params->TryGetNumberField(TEXT("slotIndex"), SlotIdx) || SlotIdx < 0)
+	{
+		return MCPError(TEXT("Missing 'slotIndex' (non-negative integer)"));
+	}
+	FScriptArrayHelper Helper(SA.SlotsProp, SA.ArrayAddr);
+	if (SlotIdx >= Helper.Num())
+	{
+		auto Noop = MCPSuccess();
+		Noop->SetStringField(TEXT("assetPath"), SA.Asset->GetPathName());
+		Noop->SetNumberField(TEXT("slotIndex"), SlotIdx);
+		Noop->SetBoolField(TEXT("alreadyDeleted"), true);
+		return MCPResult(Noop);
+	}
+	SA.Asset->Modify();
+	Helper.RemoveValues(SlotIdx, 1);
+	SA.Asset->PostEditChange();
+	SA.Asset->MarkPackageDirty();
+	UEditorAssetLibrary::SaveAsset(SA.Asset->GetPathName());
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("assetPath"), SA.Asset->GetPathName());
+	Result->SetNumberField(TEXT("slotIndex"), SlotIdx);
+	Result->SetBoolField(TEXT("deleted"), true);
+	Result->SetNumberField(TEXT("slotCount"), Helper.Num());
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FGameplayHandlers::ListSmartObjectSlots(const TSharedPtr<FJsonObject>& Params)
+{
+	FSlotsAccess SA;
+	if (auto Err = ResolveSlots(Params, SA)) return Err;
+	FScriptArrayHelper Helper(SA.SlotsProp, SA.ArrayAddr);
+	TArray<TSharedPtr<FJsonValue>> Slots;
+	for (int32 i = 0; i < Helper.Num(); ++i)
+	{
+		TSharedPtr<FJsonObject> S = MakeShared<FJsonObject>();
+		S->SetNumberField(TEXT("index"), i);
+		void* SlotAddr = Helper.GetRawPtr(i);
+		// Export the whole struct as text - generic but always readable. Callers
+		// who want structured offset/rotation can call set_smart_object_slot to
+		// mutate or asset.set_property for typed reads.
+		FString Exported;
+		SA.SlotStruct->ExportTextItem_Direct(Exported, SlotAddr, nullptr, nullptr, PPF_None);
+		S->SetStringField(TEXT("raw"), Exported);
+		// Pull out common fields explicitly for ergonomics.
+		if (FProperty* Off = SA.SlotStruct->Struct->FindPropertyByName(FName(TEXT("Offset"))))
+		{
+			if (CastField<FStructProperty>(Off))
+			{
+				const FVector* V = reinterpret_cast<const FVector*>(Off->ContainerPtrToValuePtr<void>(SlotAddr));
+				TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+				O->SetNumberField(TEXT("x"), V->X); O->SetNumberField(TEXT("y"), V->Y); O->SetNumberField(TEXT("z"), V->Z);
+				S->SetObjectField(TEXT("offset"), O);
+			}
+		}
+		if (FProperty* Rot = SA.SlotStruct->Struct->FindPropertyByName(FName(TEXT("Rotation"))))
+		{
+			if (CastField<FStructProperty>(Rot))
+			{
+				const FRotator* R = reinterpret_cast<const FRotator*>(Rot->ContainerPtrToValuePtr<void>(SlotAddr));
+				TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+				O->SetNumberField(TEXT("pitch"), R->Pitch); O->SetNumberField(TEXT("yaw"), R->Yaw); O->SetNumberField(TEXT("roll"), R->Roll);
+				S->SetObjectField(TEXT("rotation"), O);
+			}
+		}
+		Slots.Add(MakeShared<FJsonValueObject>(S));
+	}
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("assetPath"), SA.Asset->GetPathName());
+	Result->SetNumberField(TEXT("slotCount"), Helper.Num());
+	Result->SetArrayField(TEXT("slots"), Slots);
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FGameplayHandlers::AddSmartObjectSlotBehavior(const TSharedPtr<FJsonObject>& Params)
+{
+	FSlotsAccess SA;
+	if (auto Err = ResolveSlots(Params, SA)) return Err;
+	int32 SlotIdx = -1;
+	if (!Params->TryGetNumberField(TEXT("slotIndex"), SlotIdx) || SlotIdx < 0)
+	{
+		return MCPError(TEXT("Missing 'slotIndex' (non-negative integer)"));
+	}
+	FString BehaviorClassPath;
+	if (auto Err2 = RequireString(Params, TEXT("behaviorClass"), BehaviorClassPath)) return Err2;
+
+	FScriptArrayHelper Helper(SA.SlotsProp, SA.ArrayAddr);
+	if (SlotIdx >= Helper.Num()) return MCPError(FString::Printf(TEXT("slotIndex %d out of range"), SlotIdx));
+	void* SlotAddr = Helper.GetRawPtr(SlotIdx);
+
+	FProperty* BDProp = SA.SlotStruct->Struct->FindPropertyByName(FName(TEXT("BehaviorDefinitions")));
+	if (!BDProp) return MCPError(TEXT("Slot struct has no 'BehaviorDefinitions' property"));
+	FArrayProperty* BDArr = CastField<FArrayProperty>(BDProp);
+	if (!BDArr) return MCPError(TEXT("'BehaviorDefinitions' is not a TArray"));
+	FObjectProperty* BDObj = CastField<FObjectProperty>(BDArr->Inner);
+	if (!BDObj) return MCPError(TEXT("'BehaviorDefinitions' inner is not a UObject*"));
+
+	// Resolve the behavior class. Caller may pass either a class path or an
+	// existing UBehaviorDefinition asset; the array holds object pointers.
+	UObject* BehaviorAsset = LoadObject<UObject>(nullptr, *BehaviorClassPath);
+	if (!BehaviorAsset)
+	{
+		// Try as a class path
+		UClass* BehaviorClass = LoadClass<UObject>(nullptr, *BehaviorClassPath);
+		if (!BehaviorClass) return MCPError(FString::Printf(TEXT("Could not load behavior asset/class '%s'"), *BehaviorClassPath));
+		BehaviorAsset = NewObject<UObject>(SA.Asset, BehaviorClass);
+	}
+
+	SA.Asset->Modify();
+	FScriptArrayHelper BDHelper(BDArr, BDProp->ContainerPtrToValuePtr<void>(SlotAddr));
+	const int32 NewBDIdx = BDHelper.AddValue();
+	BDObj->SetObjectPropertyValue(BDHelper.GetRawPtr(NewBDIdx), BehaviorAsset);
+
+	// Optional instance properties: dictionary of name -> JSON value applied
+	// to the new behavior asset.
+	const TSharedPtr<FJsonObject>* InstObj = nullptr;
+	if (Params->TryGetObjectField(TEXT("instanceProperties"), InstObj) && InstObj && (*InstObj).IsValid())
+	{
+		for (const auto& Pair : (*InstObj)->Values)
+		{
+			FProperty* P = BehaviorAsset->GetClass()->FindPropertyByName(FName(*Pair.Key));
+			if (!P) continue;
+			FString E;
+			MCPJsonProperty::SetJsonOnProperty(P, P->ContainerPtrToValuePtr<void>(BehaviorAsset), Pair.Value, E);
+		}
+	}
+
+	SA.Asset->PostEditChange();
+	SA.Asset->MarkPackageDirty();
+	UEditorAssetLibrary::SaveAsset(SA.Asset->GetPathName());
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("assetPath"), SA.Asset->GetPathName());
+	Result->SetNumberField(TEXT("slotIndex"), SlotIdx);
+	Result->SetNumberField(TEXT("behaviorIndex"), NewBDIdx);
+	Result->SetStringField(TEXT("behavior"), BehaviorAsset->GetClass()->GetPathName());
 	return MCPResult(Result);
 }
 
@@ -352,16 +656,8 @@ TSharedPtr<FJsonValue> FGameplayHandlers::ListStateTrees(const TSharedPtr<FJsonO
 
 TSharedPtr<FJsonValue> FGameplayHandlers::ProjectPointToNavigation(const TSharedPtr<FJsonObject>& Params)
 {
-	const TSharedPtr<FJsonObject>* LocationObj = nullptr;
-	if (!Params->TryGetObjectField(TEXT("location"), LocationObj))
-	{
-		return MCPError(TEXT("Missing 'location' parameter"));
-	}
-
 	FVector Point;
-	Point.X = (*LocationObj)->GetNumberField(TEXT("x"));
-	Point.Y = (*LocationObj)->GetNumberField(TEXT("y"));
-	Point.Z = (*LocationObj)->GetNumberField(TEXT("z"));
+	if (auto Err = RequireVec3(Params, TEXT("location"), Point)) return Err;
 
 	REQUIRE_EDITOR_WORLD(World);
 
@@ -395,33 +691,22 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateBlackboard(const TSharedPtr<FJso
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/AI"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("BlackboardData")))
-	{
-		return Existing;
-	}
-
 	UClass* BlackboardClass = FindObject<UClass>(nullptr, TEXT("/Script/AIModule.BlackboardData"));
 	if (!BlackboardClass)
 	{
 		return MCPError(TEXT("BlackboardData class not found."));
 	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("BlackboardData"), BlackboardClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, BlackboardClass, nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create BlackboardData"));
-	}
-
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 
 	return MCPResult(Result);
 }
@@ -434,33 +719,22 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateBehaviorTree(const TSharedPtr<FJ
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/AI"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("BehaviorTree")))
-	{
-		return Existing;
-	}
-
 	UClass* BTClass = FindObject<UClass>(nullptr, TEXT("/Script/AIModule.BehaviorTree"));
 	if (!BTClass)
 	{
 		return MCPError(TEXT("BehaviorTree class not found."));
 	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("BehaviorTree"), BTClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, BTClass, nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create BehaviorTree"));
-	}
-
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 
 	return MCPResult(Result);
 }
@@ -473,33 +747,22 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateEqsQuery(const TSharedPtr<FJsonO
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/AI/EQS"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("EnvironmentQuery")))
-	{
-		return Existing;
-	}
-
 	UClass* EQSClass = FindObject<UClass>(nullptr, TEXT("/Script/AIModule.EnvironmentQuery"));
 	if (!EQSClass)
 	{
 		return MCPError(TEXT("EnvironmentQuery class not found."));
 	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("EnvironmentQuery"), EQSClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, EQSClass, nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create EnvironmentQuery"));
-	}
-
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 
 	return MCPResult(Result);
 }
@@ -512,33 +775,22 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateStateTree(const TSharedPtr<FJson
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/AI"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("StateTree")))
-	{
-		return Existing;
-	}
-
 	UClass* STClass = FindObject<UClass>(nullptr, TEXT("/Script/StateTreeModule.StateTree"));
 	if (!STClass)
 	{
 		return MCPError(TEXT("StateTree class not found. Enable StateTree plugin."));
 	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("StateTree"), STClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, STClass, nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create StateTree"));
-	}
-
-	UEditorAssetLibrary::SaveAsset(NewAsset->GetPathName());
+	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 
 	return MCPResult(Result);
 }
@@ -551,29 +803,12 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateBlueprintWithParent(const FStrin
 		return MCPError(FString::Printf(TEXT("%s class not found: %s"), *FriendlyTypeName, *ParentClassPath));
 	}
 
-	// Idempotency: check if the blueprint already exists.
-	const FString ProbePath = PackagePath + TEXT("/") + Name + TEXT(".") + Name;
-	if (UBlueprint* Existing = LoadObject<UBlueprint>(nullptr, *ProbePath))
-	{
-		auto Res = MCPSuccess();
-		MCPSetExisted(Res);
-		Res->SetStringField(TEXT("path"), Existing->GetPathName());
-		Res->SetStringField(TEXT("name"), Name);
-		Res->SetStringField(TEXT("type"), FriendlyTypeName);
-		return MCPResult(Res);
-	}
-
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
 	UBlueprintFactory* BlueprintFactory = NewObject<UBlueprintFactory>();
 	BlueprintFactory->ParentClass = ParentClass;
 
-	UBlueprint* NewBlueprint = Cast<UBlueprint>(AssetTools.CreateAsset(Name, PackagePath, UBlueprint::StaticClass(), BlueprintFactory));
-	if (!NewBlueprint)
-	{
-		return MCPError(FString::Printf(TEXT("Failed to create %s Blueprint"), *FriendlyTypeName));
-	}
+	auto Created = MCPCreateAssetIdempotent<UBlueprint>(Name, PackagePath, TEXT("skip"), FriendlyTypeName, BlueprintFactory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UBlueprint* NewBlueprint = Created.Asset;
 
 	NewBlueprint->ParentClass = ParentClass;
 	FKismetEditorUtilities::CompileBlueprint(NewBlueprint);
@@ -645,313 +880,6 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateHud(const TSharedPtr<FJsonObject
 	return CreateBlueprintWithParent(Name, PackagePath, TEXT("/Script/Engine.HUD"), TEXT("HUD"));
 }
 
-TSharedPtr<FJsonValue> FGameplayHandlers::SetCollisionProfile(const TSharedPtr<FJsonObject>& Params)
-{
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-
-	FString ProfileName;
-	if (auto Err = RequireString(Params, TEXT("profileName"), ProfileName)) return Err;
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Find actor by label
-	AActor* FoundActor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			FoundActor = *ActorIt;
-			break;
-		}
-	}
-
-	if (!FoundActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
-
-	// Set collision profile on all primitive components
-	int32 ComponentsUpdated = 0;
-	TArray<UPrimitiveComponent*> PrimitiveComponents;
-	FoundActor->GetComponents<UPrimitiveComponent>(PrimitiveComponents);
-
-	// Idempotency: if every prim already matches, short-circuit
-	const FName ProfileFName(*ProfileName);
-	bool bAllMatch = PrimitiveComponents.Num() > 0;
-	for (UPrimitiveComponent* PrimComp : PrimitiveComponents)
-	{
-		if (!PrimComp || PrimComp->GetCollisionProfileName() != ProfileFName)
-		{
-			bAllMatch = false;
-			break;
-		}
-	}
-	if (bAllMatch)
-	{
-		auto Noop = MCPSuccess();
-		MCPSetExisted(Noop);
-		Noop->SetStringField(TEXT("actorLabel"), ActorLabel);
-		Noop->SetStringField(TEXT("profileName"), ProfileName);
-		return MCPResult(Noop);
-	}
-
-	for (UPrimitiveComponent* PrimComp : PrimitiveComponents)
-	{
-		if (PrimComp)
-		{
-			PrimComp->SetCollisionProfileName(ProfileFName);
-			ComponentsUpdated++;
-		}
-	}
-
-	auto Result = MCPSuccess();
-	MCPSetUpdated(Result);
-	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
-	Result->SetStringField(TEXT("profileName"), ProfileName);
-	Result->SetNumberField(TEXT("componentsUpdated"), ComponentsUpdated);
-	// No rollback: multi-component previous state capture not yet implemented.
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FGameplayHandlers::SetPhysicsEnabled(const TSharedPtr<FJsonObject>& Params)
-{
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-
-	bool bEnabled = OptionalBool(Params, TEXT("enabled"), true);
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Find actor by label
-	AActor* FoundActor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			FoundActor = *ActorIt;
-			break;
-		}
-	}
-
-	if (!FoundActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
-
-	// Set physics simulation on all primitive components
-	int32 ComponentsUpdated = 0;
-	TArray<UPrimitiveComponent*> PrimitiveComponents;
-	FoundActor->GetComponents<UPrimitiveComponent>(PrimitiveComponents);
-
-	// Idempotency: if every prim already matches, short-circuit
-	bool bAllMatch = PrimitiveComponents.Num() > 0;
-	for (UPrimitiveComponent* PrimComp : PrimitiveComponents)
-	{
-		if (!PrimComp || PrimComp->IsSimulatingPhysics() != bEnabled)
-		{
-			bAllMatch = false;
-			break;
-		}
-	}
-	if (bAllMatch)
-	{
-		auto Noop = MCPSuccess();
-		MCPSetExisted(Noop);
-		Noop->SetStringField(TEXT("actorLabel"), ActorLabel);
-		Noop->SetBoolField(TEXT("enabled"), bEnabled);
-		return MCPResult(Noop);
-	}
-
-	for (UPrimitiveComponent* PrimComp : PrimitiveComponents)
-	{
-		if (PrimComp)
-		{
-			PrimComp->SetSimulatePhysics(bEnabled);
-			ComponentsUpdated++;
-		}
-	}
-
-	auto Result = MCPSuccess();
-	MCPSetUpdated(Result);
-	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
-	Result->SetBoolField(TEXT("enabled"), bEnabled);
-	Result->SetNumberField(TEXT("componentsUpdated"), ComponentsUpdated);
-
-	// Rollback: self-inverse with flipped flag (approximation: prior state assumed uniform)
-	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
-	Payload->SetBoolField(TEXT("enabled"), !bEnabled);
-	MCPSetRollback(Result, TEXT("set_physics_enabled"), Payload);
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FGameplayHandlers::SetCollisionType(const TSharedPtr<FJsonObject>& Params)
-{
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-
-	FString CollisionType;
-	if (auto Err = RequireString(Params, TEXT("collisionType"), CollisionType)) return Err;
-
-	// Map string to ECollisionEnabled::Type
-	ECollisionEnabled::Type CollisionEnabled;
-	if (CollisionType == TEXT("NoCollision"))
-	{
-		CollisionEnabled = ECollisionEnabled::NoCollision;
-	}
-	else if (CollisionType == TEXT("QueryOnly"))
-	{
-		CollisionEnabled = ECollisionEnabled::QueryOnly;
-	}
-	else if (CollisionType == TEXT("PhysicsOnly"))
-	{
-		CollisionEnabled = ECollisionEnabled::PhysicsOnly;
-	}
-	else if (CollisionType == TEXT("QueryAndPhysics"))
-	{
-		CollisionEnabled = ECollisionEnabled::QueryAndPhysics;
-	}
-	else
-	{
-		return MCPError(FString::Printf(TEXT("Invalid collisionType: %s. Use NoCollision, QueryOnly, PhysicsOnly, or QueryAndPhysics"), *CollisionType));
-	}
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Find actor by label
-	AActor* FoundActor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			FoundActor = *ActorIt;
-			break;
-		}
-	}
-
-	if (!FoundActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
-
-	// Set collision enabled on all primitive components
-	int32 ComponentsUpdated = 0;
-	TArray<UPrimitiveComponent*> PrimitiveComponents;
-	FoundActor->GetComponents<UPrimitiveComponent>(PrimitiveComponents);
-
-	// Idempotency: all prims already match?
-	bool bAllMatch = PrimitiveComponents.Num() > 0;
-	for (UPrimitiveComponent* PrimComp : PrimitiveComponents)
-	{
-		if (!PrimComp || PrimComp->GetCollisionEnabled() != CollisionEnabled)
-		{
-			bAllMatch = false;
-			break;
-		}
-	}
-	if (bAllMatch)
-	{
-		auto Noop = MCPSuccess();
-		MCPSetExisted(Noop);
-		Noop->SetStringField(TEXT("actorLabel"), ActorLabel);
-		Noop->SetStringField(TEXT("collisionType"), CollisionType);
-		return MCPResult(Noop);
-	}
-
-	for (UPrimitiveComponent* PrimComp : PrimitiveComponents)
-	{
-		if (PrimComp)
-		{
-			PrimComp->SetCollisionEnabled(CollisionEnabled);
-			ComponentsUpdated++;
-		}
-	}
-
-	auto Result = MCPSuccess();
-	MCPSetUpdated(Result);
-	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
-	Result->SetStringField(TEXT("collisionType"), CollisionType);
-	Result->SetNumberField(TEXT("componentsUpdated"), ComponentsUpdated);
-	// No rollback: multi-component previous state capture not yet implemented.
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FGameplayHandlers::SetBodyProperties(const TSharedPtr<FJsonObject>& Params)
-{
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Find actor by label
-	AActor* FoundActor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			FoundActor = *ActorIt;
-			break;
-		}
-	}
-
-	if (!FoundActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
-
-	// Set body properties on all primitive components
-	int32 ComponentsUpdated = 0;
-	TArray<UPrimitiveComponent*> PrimitiveComponents;
-	FoundActor->GetComponents<UPrimitiveComponent>(PrimitiveComponents);
-
-	double Mass = -1.0;
-	double LinearDamping = -1.0;
-	double AngularDamping = -1.0;
-	bool bHasGravityParam = false;
-	bool bEnableGravity = true;
-
-	Params->TryGetNumberField(TEXT("mass"), Mass);
-	Params->TryGetNumberField(TEXT("linearDamping"), LinearDamping);
-	Params->TryGetNumberField(TEXT("angularDamping"), AngularDamping);
-	bHasGravityParam = Params->TryGetBoolField(TEXT("enableGravity"), bEnableGravity);
-
-	for (UPrimitiveComponent* PrimComp : PrimitiveComponents)
-	{
-		if (PrimComp)
-		{
-			if (Mass >= 0.0)
-			{
-				PrimComp->BodyInstance.SetMassOverride(Mass);
-			}
-			if (LinearDamping >= 0.0)
-			{
-				PrimComp->SetLinearDamping(LinearDamping);
-			}
-			if (AngularDamping >= 0.0)
-			{
-				PrimComp->SetAngularDamping(AngularDamping);
-			}
-			if (bHasGravityParam)
-			{
-				PrimComp->SetEnableGravity(bEnableGravity);
-			}
-			ComponentsUpdated++;
-		}
-	}
-
-	auto Result = MCPSuccess();
-	MCPSetUpdated(Result);
-	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
-	Result->SetNumberField(TEXT("componentsUpdated"), ComponentsUpdated);
-	// No rollback: multi-component previous state capture not yet implemented.
-
-	return MCPResult(Result);
-}
-
 TSharedPtr<FJsonValue> FGameplayHandlers::SpawnNavModifierVolume(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
@@ -959,42 +887,13 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SpawnNavModifierVolume(const TSharedPt
 	const FString Label = OptionalString(Params, TEXT("label"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (!Label.IsEmpty())
+	if (auto Existing = MCPCheckActorLabelExists(World, Label, OnConflict, TEXT("NavModifierVolume")))
 	{
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			if (It->GetActorLabel() == Label)
-			{
-				if (OnConflict == TEXT("error"))
-				{
-					return MCPError(FString::Printf(TEXT("NavModifierVolume '%s' already exists"), *Label));
-				}
-				auto Existing = MCPSuccess();
-				MCPSetExisted(Existing);
-				Existing->SetStringField(TEXT("actorLabel"), Label);
-				return MCPResult(Existing);
-			}
-		}
+		return Existing;
 	}
 
-	FVector Location = FVector::ZeroVector;
-	const TSharedPtr<FJsonObject>* LocationObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("location"), LocationObj))
-	{
-		Location.X = (*LocationObj)->GetNumberField(TEXT("x"));
-		Location.Y = (*LocationObj)->GetNumberField(TEXT("y"));
-		Location.Z = (*LocationObj)->GetNumberField(TEXT("z"));
-	}
-
-	// Get scale
-	FVector Scale = FVector::OneVector;
-	const TSharedPtr<FJsonObject>* ScaleObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("scale"), ScaleObj))
-	{
-		Scale.X = (*ScaleObj)->GetNumberField(TEXT("x"));
-		Scale.Y = (*ScaleObj)->GetNumberField(TEXT("y"));
-		Scale.Z = (*ScaleObj)->GetNumberField(TEXT("z"));
-	}
+	const FVector Location = OptionalVec3(Params, TEXT("location"));
+	const FVector Scale = OptionalVec3(Params, TEXT("scale"), FVector::OneVector);
 
 	FTransform SpawnTransform;
 	SpawnTransform.SetLocation(Location);
@@ -1045,69 +944,94 @@ TSharedPtr<FJsonValue> FGameplayHandlers::RebuildNavmesh(const TSharedPtr<FJsonO
 	return MCPResult(Result);
 }
 
-TSharedPtr<FJsonValue> FGameplayHandlers::GetCdoDefaults(const TSharedPtr<FJsonObject>& Params)
+// #424: synchronous path query between two world points. Returns the polyline
+// (if any), partial flag, and total length. The standard "why doesn't my AI
+// move?" diagnostic.
+TSharedPtr<FJsonValue> FGameplayHandlers::FindNavPath(const TSharedPtr<FJsonObject>& Params)
 {
-	FString ClassName;
-	if (auto Err = RequireString(Params, TEXT("className"), ClassName)) return Err;
+	REQUIRE_EDITOR_WORLD(World);
 
-	// Try to find the class by name - support both short names and full paths
-	UClass* FoundClass = nullptr;
+	const FVector Start = OptionalVec3(Params, TEXT("start"));
+	const FVector End = OptionalVec3(Params, TEXT("end"));
 
-	// Try full path first (e.g. "/Script/Engine.Actor")
-	FoundClass = FindObject<UClass>(nullptr, *ClassName);
+	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	if (!NavSys) return MCPError(TEXT("Navigation system unavailable"));
 
-	// If not found, search by short name
-	if (!FoundClass)
+	// Optional pathfindingContext (actor label) so the path query uses the
+	// matching navigation filter / agent.
+	AActor* Context = nullptr;
+	FString ContextLabel = OptionalString(Params, TEXT("pathfindingContext"));
+	if (!ContextLabel.IsEmpty()) Context = FindActorByLabel(World, ContextLabel);
+
+	UNavigationPath* Path = NavSys->FindPathToLocationSynchronously(World, Start, End, Context);
+	auto Result = MCPSuccess();
+	Result->SetObjectField(TEXT("start"), MCPVec3ToJsonObject(Start));
+	Result->SetObjectField(TEXT("end"), MCPVec3ToJsonObject(End));
+	if (!Path)
 	{
-		for (TObjectIterator<UClass> It; It; ++It)
+		Result->SetBoolField(TEXT("valid"), false);
+		Result->SetBoolField(TEXT("partial"), false);
+		Result->SetNumberField(TEXT("length"), 0.0);
+		Result->SetArrayField(TEXT("points"), {});
+		return MCPResult(Result);
+	}
+	Result->SetBoolField(TEXT("valid"), Path->IsValid());
+	Result->SetBoolField(TEXT("partial"), Path->IsPartial());
+	Result->SetNumberField(TEXT("length"), Path->GetPathLength());
+	TArray<TSharedPtr<FJsonValue>> Points;
+	for (const FVector& P : Path->PathPoints)
+	{
+		Points.Add(MakeShared<FJsonValueObject>(MCPVec3ToJsonObject(P)));
+	}
+	Result->SetArrayField(TEXT("points"), Points);
+	return MCPResult(Result);
+}
+
+// #424: enumerate every actor in the world carrying a NavigationInvokerComponent
+// plus its tile-generation radius. Useful for diagnosing "AI doesn't move
+// because there's no nav data tiled here".
+TSharedPtr<FJsonValue> FGameplayHandlers::ListNavInvokers(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+
+	UClass* InvokerClass = FindObject<UClass>(nullptr, TEXT("/Script/NavigationSystem.NavigationInvokerComponent"));
+	if (!InvokerClass) InvokerClass = LoadObject<UClass>(nullptr, TEXT("/Script/NavigationSystem.NavigationInvokerComponent"));
+	if (!InvokerClass) return MCPError(TEXT("NavigationInvokerComponent class not found"));
+
+	TArray<TSharedPtr<FJsonValue>> Out;
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* A = *It;
+		if (!A) continue;
+		TArray<UActorComponent*> Comps;
+		A->GetComponents(InvokerClass, Comps);
+		for (UActorComponent* Comp : Comps)
 		{
-			if (It->GetName() == ClassName)
+			if (!Comp) continue;
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("actorLabel"), A->GetActorLabel());
+			Entry->SetStringField(TEXT("componentName"), Comp->GetName());
+			Entry->SetStringField(TEXT("componentClass"), Comp->GetClass()->GetName());
+			// Read TileGenerationRadius + TileRemovalRadius via reflection so we
+			// don't link against the NavigationSystem editor module just for
+			// these two properties.
+			auto ReadFloat = [&](const TCHAR* PropName) -> double
 			{
-				FoundClass = *It;
-				break;
-			}
+				if (FFloatProperty* FP = CastField<FFloatProperty>(Comp->GetClass()->FindPropertyByName(PropName)))
+					return FP->GetPropertyValue_InContainer(Comp);
+				if (FDoubleProperty* DP = CastField<FDoubleProperty>(Comp->GetClass()->FindPropertyByName(PropName)))
+					return DP->GetPropertyValue_InContainer(Comp);
+				return 0.0;
+			};
+			Entry->SetNumberField(TEXT("tileGenerationRadius"), ReadFloat(TEXT("TileGenerationRadius")));
+			Entry->SetNumberField(TEXT("tileRemovalRadius"), ReadFloat(TEXT("TileRemovalRadius")));
+			Out.Add(MakeShared<FJsonValueObject>(Entry));
 		}
 	}
 
-	if (!FoundClass)
-	{
-		return MCPError(FString::Printf(TEXT("Class not found: %s"), *ClassName));
-	}
-
-	UObject* CDO = FoundClass->GetDefaultObject();
-	if (!CDO)
-	{
-		return MCPError(FString::Printf(TEXT("Could not get CDO for class: %s"), *ClassName));
-	}
-
 	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("className"), FoundClass->GetName());
-	Result->SetStringField(TEXT("classPath"), FoundClass->GetPathName());
-
-	// Iterate properties and collect their default values
-	TArray<TSharedPtr<FJsonValue>> PropertiesArray;
-	for (TFieldIterator<FProperty> PropIt(FoundClass); PropIt; ++PropIt)
-	{
-		FProperty* Property = *PropIt;
-		if (!Property) continue;
-
-		TSharedPtr<FJsonObject> PropObj = MakeShared<FJsonObject>();
-		PropObj->SetStringField(TEXT("name"), Property->GetName());
-		PropObj->SetStringField(TEXT("type"), Property->GetCPPType());
-		PropObj->SetStringField(TEXT("class"), Property->GetOwnerClass() ? Property->GetOwnerClass()->GetName() : TEXT("Unknown"));
-
-		// Get string representation of the default value
-		FString ValueStr;
-		const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(CDO);
-		Property->ExportTextItem_Direct(ValueStr, ValuePtr, nullptr, nullptr, PPF_None);
-		PropObj->SetStringField(TEXT("defaultValue"), ValueStr);
-
-		PropertiesArray.Add(MakeShared<FJsonValueObject>(PropObj));
-	}
-
-	Result->SetArrayField(TEXT("properties"), PropertiesArray);
-	Result->SetNumberField(TEXT("propertyCount"), PropertiesArray.Num());
-
+	Result->SetNumberField(TEXT("count"), Out.Num());
+	Result->SetArrayField(TEXT("invokers"), Out);
 	return MCPResult(Result);
 }
 
@@ -1178,86 +1102,6 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SetWorldGameMode(const TSharedPtr<FJso
 		Payload->SetStringField(TEXT("gameModeClass"), PrevGameMode->GetPathName());
 		MCPSetRollback(Result, TEXT("set_world_game_mode"), Payload);
 	}
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FGameplayHandlers::CreateAiPerceptionConfig(const TSharedPtr<FJsonObject>& Params)
-{
-	FString BlueprintPath;
-	if (auto Err = RequireString(Params, TEXT("blueprintPath"), BlueprintPath)) return Err;
-
-	UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
-	if (!Blueprint || !Blueprint->GeneratedClass)
-	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found or has no generated class: %s"), *BlueprintPath));
-	}
-
-	// The blueprint must be an Actor-based blueprint to add components
-	if (!Blueprint->GeneratedClass->IsChildOf(AActor::StaticClass()))
-	{
-		return MCPError(TEXT("Blueprint must be based on AActor to add perception component"));
-	}
-
-	// Read which senses to configure
-	bool bAddSight = OptionalBool(Params, TEXT("addSight"), true);
-	bool bAddHearing = OptionalBool(Params, TEXT("addHearing"), false);
-	bool bAddDamage = OptionalBool(Params, TEXT("addDamage"), false);
-
-	// Add AIPerceptionComponent via the SCS (SimpleConstructionScript)
-	USCS_Node* PerceptionNode = Blueprint->SimpleConstructionScript->CreateNode(UAIPerceptionComponent::StaticClass(), TEXT("AIPerceptionComp"));
-	if (!PerceptionNode)
-	{
-		return MCPError(TEXT("Failed to create AIPerceptionComponent node"));
-	}
-
-	Blueprint->SimpleConstructionScript->AddNode(PerceptionNode);
-
-	UAIPerceptionComponent* PerceptionComp = Cast<UAIPerceptionComponent>(PerceptionNode->ComponentTemplate);
-	if (!PerceptionComp)
-	{
-		return MCPError(TEXT("Failed to get AIPerceptionComponent template"));
-	}
-
-	TArray<TSharedPtr<FJsonValue>> SensesAdded;
-
-	// Configure sight sense
-	if (bAddSight)
-	{
-		UAISenseConfig_Sight* SightConfig = NewObject<UAISenseConfig_Sight>(PerceptionComp, TEXT("SightConfig"));
-		SightConfig->SightRadius = 3000.0f;
-		SightConfig->LoseSightRadius = 3500.0f;
-		SightConfig->PeripheralVisionAngleDegrees = 90.0f;
-		PerceptionComp->ConfigureSense(*SightConfig);
-		SensesAdded.Add(MakeShared<FJsonValueString>(TEXT("Sight")));
-	}
-
-	// Configure hearing sense
-	if (bAddHearing)
-	{
-		UAISenseConfig_Hearing* HearingConfig = NewObject<UAISenseConfig_Hearing>(PerceptionComp, TEXT("HearingConfig"));
-		HearingConfig->HearingRange = 3000.0f;
-		PerceptionComp->ConfigureSense(*HearingConfig);
-		SensesAdded.Add(MakeShared<FJsonValueString>(TEXT("Hearing")));
-	}
-
-	// Configure damage sense
-	if (bAddDamage)
-	{
-		UAISenseConfig_Damage* DamageConfig = NewObject<UAISenseConfig_Damage>(PerceptionComp, TEXT("DamageConfig"));
-		PerceptionComp->ConfigureSense(*DamageConfig);
-		SensesAdded.Add(MakeShared<FJsonValueString>(TEXT("Damage")));
-	}
-
-	// Compile and save
-	FKismetEditorUtilities::CompileBlueprint(Blueprint);
-
-	SaveAssetPackage(Blueprint);
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("blueprintPath"), BlueprintPath);
-	Result->SetStringField(TEXT("componentName"), TEXT("AIPerceptionComp"));
-	Result->SetArrayField(TEXT("sensesConfigured"), SensesAdded);
 
 	return MCPResult(Result);
 }
@@ -1360,258 +1204,50 @@ TSharedPtr<FJsonValue> FGameplayHandlers::AddBlackboardKey(const TSharedPtr<FJso
 
 	return MCPResult(Result);
 }
-TSharedPtr<FJsonValue> FGameplayHandlers::ConfigureBehaviorTree(const TSharedPtr<FJsonObject>& Params)
-{
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 
+// #250: rebind a BehaviorTree asset's BlackboardAsset reference. The field is
+// `protected` in C++ so direct writes need reflection; Python set_editor_property
+// also can't reach it because the UPROPERTY is BlueprintReadOnly.
+TSharedPtr<FJsonValue> FGameplayHandlers::SetBehaviorTreeBlackboard(const TSharedPtr<FJsonObject>& Params)
+{
 	FString BehaviorTreePath;
 	if (auto Err = RequireString(Params, TEXT("behaviorTreePath"), BehaviorTreePath)) return Err;
 
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Find actor by label - should be an AI-controlled pawn/character
-	AActor* FoundActor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			FoundActor = *ActorIt;
-			break;
-		}
-	}
-
-	if (!FoundActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
-
-	// Load the behavior tree asset
-	UBehaviorTree* BehaviorTree = LoadObject<UBehaviorTree>(nullptr, *BehaviorTreePath);
-	if (!BehaviorTree)
-	{
-		return MCPError(FString::Printf(TEXT("BehaviorTree not found: %s"), *BehaviorTreePath));
-	}
-
-	// Optionally load blackboard
 	FString BlackboardPath;
-	UBlackboardData* BlackboardAsset = nullptr;
-	if (Params->TryGetStringField(TEXT("blackboardPath"), BlackboardPath))
+	if (auto Err = RequireString(Params, TEXT("blackboardPath"), BlackboardPath)) return Err;
+
+	UBehaviorTree* BT = LoadObject<UBehaviorTree>(nullptr, *BehaviorTreePath);
+	if (!BT) return MCPError(FString::Printf(TEXT("BehaviorTree not found: %s"), *BehaviorTreePath));
+
+	UBlackboardData* BB = LoadObject<UBlackboardData>(nullptr, *BlackboardPath);
+	if (!BB) return MCPError(FString::Printf(TEXT("BlackboardData not found: %s"), *BlackboardPath));
+
+	FObjectProperty* BBProp = CastField<FObjectProperty>(BT->GetClass()->FindPropertyByName(TEXT("BlackboardAsset")));
+	if (!BBProp)
 	{
-		BlackboardAsset = LoadObject<UBlackboardData>(nullptr, *BlackboardPath);
-		if (!BlackboardAsset)
-		{
-			return MCPError(FString::Printf(TEXT("BlackboardData not found: %s"), *BlackboardPath));
-		}
+		return MCPError(TEXT("BehaviorTree class has no BlackboardAsset property - engine version drift?"));
 	}
 
-	// Find or get the AI controller for this actor
-	APawn* Pawn = Cast<APawn>(FoundActor);
-	if (!Pawn)
-	{
-		return MCPError(TEXT("Actor is not a Pawn. BehaviorTree requires an AI-controlled Pawn."));
-	}
+	UBlackboardData* Previous = Cast<UBlackboardData>(BBProp->GetObjectPropertyValue_InContainer(BT));
 
-	AAIController* AIController = Cast<AAIController>(Pawn->GetController());
-	if (!AIController)
-	{
-		return MCPError(TEXT("Pawn does not have an AAIController. Assign an AI controller first."));
-	}
-
-	// In UE 5.7, use RunBehaviorTree() on the AI controller rather than
-	// SetDefaultTree()/SetDefaultBlackboard() on BehaviorTreeComponent (which don't exist).
-	// RunBehaviorTree() handles creating/configuring the BehaviorTreeComponent internally
-	// and also initializes the blackboard from the tree's BlackboardAsset if set.
-	bool bSuccess = AIController->RunBehaviorTree(BehaviorTree);
-	if (!bSuccess)
-	{
-		return MCPError(TEXT("Failed to run behavior tree on AI controller"));
-	}
-
-	// If a separate blackboard was specified, use the tree's component to apply it
-	if (BlackboardAsset)
-	{
-		UBehaviorTreeComponent* BTComp = Cast<UBehaviorTreeComponent>(AIController->GetBrainComponent());
-		if (BTComp)
-		{
-			// The blackboard is initialized via the tree asset's BlackboardAsset property.
-			// If a custom blackboard was provided, we can set it on the tree asset itself
-			// before starting, or use the blackboard component on the controller.
-			UBlackboardComponent* BBComp = AIController->GetBlackboardComponent();
-			if (BBComp)
-			{
-				BBComp->InitializeBlackboard(*BlackboardAsset);
-			}
-		}
-	}
+	BT->Modify();
+	BBProp->SetObjectPropertyValue_InContainer(BT, BB);
+	BT->PostEditChange();
+	SaveAssetPackage(BT);
 
 	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
-	Result->SetStringField(TEXT("behaviorTree"), BehaviorTree->GetName());
-	if (BlackboardAsset)
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("behaviorTreePath"), BehaviorTreePath);
+	Result->SetStringField(TEXT("blackboardPath"), BlackboardPath);
+	if (Previous)
 	{
-		Result->SetStringField(TEXT("blackboard"), BlackboardAsset->GetName());
+		Result->SetStringField(TEXT("previousBlackboard"), Previous->GetPathName());
+
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("behaviorTreePath"), BehaviorTreePath);
+		Payload->SetStringField(TEXT("blackboardPath"), Previous->GetPathName());
+		MCPSetRollback(Result, TEXT("set_behavior_tree_blackboard"), Payload);
 	}
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FGameplayHandlers::SetupPathFollowing(const TSharedPtr<FJsonObject>& Params)
-{
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Find actor by label
-	AActor* FoundActor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			FoundActor = *ActorIt;
-			break;
-		}
-	}
-
-	if (!FoundActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
-
-	// Actor must be a Pawn with an AI controller
-	APawn* Pawn = Cast<APawn>(FoundActor);
-	if (!Pawn)
-	{
-		return MCPError(TEXT("Actor is not a Pawn"));
-	}
-
-	AAIController* AIController = Cast<AAIController>(Pawn->GetController());
-	if (!AIController)
-	{
-		return MCPError(TEXT("Pawn does not have an AAIController"));
-	}
-
-	// Get the PathFollowingComponent from the AI controller
-	UPathFollowingComponent* PathFollowComp = AIController->GetPathFollowingComponent();
-	if (!PathFollowComp)
-	{
-		return MCPError(TEXT("AI Controller does not have a PathFollowingComponent"));
-	}
-
-	auto Result = MCPSuccess();
-
-	// SetMovementComponent is deprecated but SetNavMoveInterface doesn't exist yet in 5.7
-	UNavMovementComponent* NavMoveComp = Pawn->FindComponentByClass<UNavMovementComponent>();
-	if (NavMoveComp)
-	{
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
-		PathFollowComp->SetMovementComponent(NavMoveComp);
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
-	}
-	else
-	{
-		Result->SetStringField(TEXT("warning"), TEXT("No UNavMovementComponent found on pawn; path following may not work correctly"));
-	}
-
-	// Read optional acceptance radius
-	double AcceptanceRadius = -1.0;
-	if (Params->TryGetNumberField(TEXT("acceptanceRadius"), AcceptanceRadius) && AcceptanceRadius >= 0.0)
-	{
-		// acceptance radius is typically set per-request via MoveToLocation, not on the component
-	}
-
-	// Optionally trigger a move-to if target location is specified
-	const TSharedPtr<FJsonObject>* TargetObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("targetLocation"), TargetObj))
-	{
-		FVector TargetLocation;
-		TargetLocation.X = (*TargetObj)->GetNumberField(TEXT("x"));
-		TargetLocation.Y = (*TargetObj)->GetNumberField(TEXT("y"));
-		TargetLocation.Z = (*TargetObj)->GetNumberField(TEXT("z"));
-
-		FAIMoveRequest MoveRequest;
-		MoveRequest.SetGoalLocation(TargetLocation);
-		if (AcceptanceRadius >= 0.0)
-		{
-			MoveRequest.SetAcceptanceRadius(AcceptanceRadius);
-		}
-		MoveRequest.SetUsePathfinding(true);
-
-		AIController->MoveTo(MoveRequest);
-
-		TSharedPtr<FJsonObject> TargetResult = MakeShared<FJsonObject>();
-		TargetResult->SetNumberField(TEXT("x"), TargetLocation.X);
-		TargetResult->SetNumberField(TEXT("y"), TargetLocation.Y);
-		TargetResult->SetNumberField(TEXT("z"), TargetLocation.Z);
-		Result->SetObjectField(TEXT("targetLocation"), TargetResult);
-		Result->SetStringField(TEXT("moveStatus"), TEXT("move_requested"));
-	}
-
-	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
-	Result->SetBoolField(TEXT("hasNavMovementComponent"), NavMoveComp != nullptr);
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FGameplayHandlers::RunEqsQuery(const TSharedPtr<FJsonObject>& Params)
-{
-	FString QueryPath;
-	if (auto Err = RequireString(Params, TEXT("queryPath"), QueryPath)) return Err;
-
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Load the EQS query asset
-	UEnvQuery* EnvQuery = LoadObject<UEnvQuery>(nullptr, *QueryPath);
-	if (!EnvQuery)
-	{
-		return MCPError(FString::Printf(TEXT("EnvQuery not found: %s"), *QueryPath));
-	}
-
-	// Find the querier actor
-	AActor* QuerierActor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			QuerierActor = *ActorIt;
-			break;
-		}
-	}
-
-	if (!QuerierActor)
-	{
-		return MCPError(FString::Printf(TEXT("Querier actor not found: %s"), *ActorLabel));
-	}
-
-	// In UE 5.7, run EQS queries via UEnvQueryManager::RunQuery() with FEnvQueryRequest.
-	// FEnvQueryRequest and FEQSParametrizedQueryExecutionRequest do not exist as standalone types.
-	// Instead, use UEnvQueryManager directly with RunEQSQuery or the instance-based API.
-	UEnvQueryManager* EQSManager = UEnvQueryManager::GetCurrent(World);
-	if (!EQSManager)
-	{
-		return MCPError(TEXT("EnvQueryManager not available in current world"));
-	}
-
-	// Run the query synchronously-ish: we trigger it and report that it was started.
-	// EQS queries in UE are async by nature; we start the query and return its ID.
-	UEnvQueryInstanceBlueprintWrapper* QueryInstance = EQSManager->RunEQSQuery(World, EnvQuery, QuerierActor, EEnvQueryRunMode::AllMatching, nullptr);
-
-	if (!QueryInstance)
-	{
-		return MCPError(TEXT("Failed to start EQS query"));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("queryPath"), QueryPath);
-	Result->SetStringField(TEXT("queryName"), EnvQuery->GetName());
-	Result->SetStringField(TEXT("querierActor"), ActorLabel);
-	Result->SetNumberField(TEXT("queryId"), QueryInstance->GetUniqueID());
-	Result->SetStringField(TEXT("status"), TEXT("query_started"));
-
 	return MCPResult(Result);
 }
 

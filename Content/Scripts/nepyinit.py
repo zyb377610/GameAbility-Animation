@@ -4,7 +4,7 @@ import traceback
 
 
 def on_init():
-    ue.log_warning('[GameAbilityAnim] Nepy initialized.')
+    print('[GameAbilityAnim] Nepy initialized.')
 
     # ---- 编辑器辅助工具 ----
     if ue.GIsEditor:
@@ -28,10 +28,18 @@ def on_init():
         import gas.abilities.ga_fireball
     except Exception:
         traceback.print_exc()
+    try:
+        import gas.effects.ge_cooldown
+    except Exception:
+        traceback.print_exc()
+    try:
+        import gas.effects.ge_cost
+    except Exception:
+        traceback.print_exc()
 
 
 def on_shutdown():
-    ue.log_warning('[GameAbilityAnim] Nepy shutdown.')
+    print('[GameAbilityAnim] Nepy shutdown.')
 
 
 def on_debug_input(cmd_str):

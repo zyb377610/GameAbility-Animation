@@ -15,7 +15,7 @@ import traceback
 
 def on_init():
     """NePy 初始化时调用。在此 import 所有业务模块。"""
-    ue.log_warning('[MyProject] NePy initialized.')
+    ue.Log('[MyProject] Nepy initialized.')
     
     # 编辑器工具
     if ue.GIsEditor:
@@ -38,7 +38,7 @@ def on_init():
 
 def on_shutdown():
     """NePy 关闭时调用"""
-    ue.log_warning('[MyProject] NePy shutdown.')
+    ue.Log('[MyProject] NePy shutdown.')
 
 def on_tick(dt: float):
     """每帧全局回调"""
@@ -154,6 +154,19 @@ _cached_references: dict = {}
 
 热重载后需要重新初始化这些模块级状态。
 
+### 5. `@ue.uclass()` 类方法变更需重启 PIE ⚠️
+
+**关键坑**：`@reload` 只更新 Python 模块的 `__dict__`，`@ue.uclass()` 类中已有方法的 C++ 端绑定不会更新。
+
+| 改动类型 | `@reload` 生效？ |
+|---------|:--:|
+| 纯 Python 函数（如 `gmcmds.py` 中的命令） | ✅ |
+| `@ue.uclass()` 类中**新增方法** | ✅ |
+| `@ue.uclass()` 类中**已有方法的实现修改** | ❌ 需重启 PIE |
+| `@ue.uclass()` 类的 `__init_default__` 修改 | ❌ 需重启 PIE |
+
+✅ **最佳实践**：修改 `@ue.uclass()` 类后直接关闭 PIE（编辑器 Stop）再重新 Play，不要依赖 `@reload`。
+
 ---
 
 ## 五、懒加载 import（避免循环依赖）
@@ -173,14 +186,14 @@ def some_function(self):
 
 ---
 
-## 六、`ue.log` / `ue.log_warning` / `print`
+## 六、日志输出
 
 ```python
-ue.log("普通日志")           # LogNePython
-ue.log_warning("警告")        # LogNePython, Warning 级别
-print("也可以用 print")       # 同样输出到 LogNePython
-
-# ⚠️ ue.log_error 不存在，用 ue.log_warning 代替
+print("用 print 即可")           # 输出到 LogNePython，简单直接
+ue.Log("普通日志")               # 同 LogNePython，Log 级别
+ue.LogWarning("警告日志")        # Warning 级别
+ue.LogError("错误日志")          # Error 级别
+# 注意：是 ue.Log / ue.LogWarning / ue.LogError，大写开头，不是 ue.log
 ```
 
 ---

@@ -1,8 +1,18 @@
 #include "LevelHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "VolumeHelpers_Internal.h"
 #include "EditorScriptingUtilities/Public/EditorLevelLibrary.h"
 #include "Editor.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "Engine/SkeletalMesh.h"
+#include "ReferenceSkeleton.h"
+#include "CollisionQueryParams.h"
+#include "Engine/HitResult.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
+#include "Animation/AnimSingleNodeInstance.h"
+#include "Animation/AnimInstance.h"
 #include "Editor/EditorEngine.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
@@ -27,7 +37,14 @@
 #include "Engine/ExponentialHeightFog.h"
 #include "Engine/SkyLight.h"
 #include "Engine/BrushBuilder.h"
+#include "Engine/Polys.h"
+#include "Model.h"
+#include "Builders/CubeBuilder.h"
+#include "BSPOps.h"
+#include "Components/BrushComponent.h"
 #include "GameFramework/Volume.h"
+#include "PCGComponent.h"
+#include "PCGGraph.h"
 #include "Engine/BlockingVolume.h"
 #include "Engine/TriggerVolume.h"
 #include "Engine/PostProcessVolume.h"
@@ -37,6 +54,8 @@
 #include "GameFramework/PainCausingVolume.h"
 #include "Selection.h"
 #include "Engine/LevelStreaming.h"
+#include "Engine/LevelStreamingDynamic.h"
+#include "Subsystems/EditorActorSubsystem.h"
 #include "LevelEditorSubsystem.h"
 #include "EditorLevelUtils.h"
 #include "FileHelpers.h"
@@ -45,7 +64,10 @@
 #include "Engine/StaticMeshActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "Materials/MaterialInterface.h"
+#include "HandlerJsonProperty.h"
 
 void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 {
@@ -53,6 +75,8 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("place_actor"), &PlaceActor);
 	Registry.RegisterHandler(TEXT("delete_actor"), &DeleteActor);
 	Registry.RegisterHandler(TEXT("get_actor_details"), &GetActorDetails);
+	Registry.RegisterHandler(TEXT("get_component_tree"), &GetComponentTree);
+	Registry.RegisterHandler(TEXT("get_relative_transform"), &GetRelativeTransform);
 	Registry.RegisterHandler(TEXT("get_current_level"), &GetCurrentLevel);
 	Registry.RegisterHandler(TEXT("list_levels"), &ListLevels);
 	Registry.RegisterHandler(TEXT("get_selected_actors"), &GetSelectedActors);
@@ -63,9 +87,8 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_light_properties"), &SetLightProperties);
 	Registry.RegisterHandler(TEXT("spawn_volume"), &SpawnVolume);
 	Registry.RegisterHandler(TEXT("add_component_to_actor"), &AddComponentToActor);
+	Registry.RegisterHandler(TEXT("remove_component_from_actor"), &RemoveComponentFromActor);
 	Registry.RegisterHandler(TEXT("load_level"), &LoadLevel);
-	Registry.RegisterHandler(TEXT("save_level"), &SaveLevel);
-	Registry.RegisterHandler(TEXT("list_sublevels"), &ListSublevels);
 	Registry.RegisterHandler(TEXT("set_component_property"), &SetComponentProperty);
 	Registry.RegisterHandler(TEXT("set_actor_material"), &SetActorMaterial);
 	Registry.RegisterHandler(TEXT("set_volume_properties"), &SetVolumeProperties);
@@ -78,6 +101,26 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_water_body_property"), &SetWaterBodyProperty);
 	Registry.RegisterHandler(TEXT("get_actor_bounds"), &GetActorBounds);
 	Registry.RegisterHandler(TEXT("resolve_actor"), &ResolveActor);
+	Registry.RegisterHandler(TEXT("set_actor_property"), &SetActorProperty);
+	Registry.RegisterHandler(TEXT("line_trace"), &LineTrace);
+	Registry.RegisterHandler(TEXT("snap_actor_to_floor"), &SnapActorToFloor);
+	Registry.RegisterHandler(TEXT("delete_actors"), &DeleteActors);
+	Registry.RegisterHandler(TEXT("add_actor_tag"), &AddActorTag);
+	Registry.RegisterHandler(TEXT("remove_actor_tag"), &RemoveActorTag);
+	Registry.RegisterHandler(TEXT("set_actor_tags"), &SetActorTags);
+	Registry.RegisterHandler(TEXT("list_actor_tags"), &ListActorTags);
+	Registry.RegisterHandler(TEXT("attach_actor"), &AttachActor);
+	Registry.RegisterHandler(TEXT("detach_actor"), &DetachActor);
+	Registry.RegisterHandler(TEXT("set_actor_mobility"), &SetActorMobility);
+	Registry.RegisterHandler(TEXT("get_current_edit_level"), &GetCurrentEditLevel);
+	Registry.RegisterHandler(TEXT("set_current_edit_level"), &SetCurrentEditLevel);
+	Registry.RegisterHandler(TEXT("list_streaming_sublevels"), &ListStreamingSublevels);
+	Registry.RegisterHandler(TEXT("add_streaming_sublevel"), &AddStreamingSublevel);
+	Registry.RegisterHandler(TEXT("remove_streaming_sublevel"), &RemoveStreamingSublevel);
+	Registry.RegisterHandler(TEXT("set_streaming_sublevel_properties"), &SetStreamingSublevelProperties);
+	Registry.RegisterHandler(TEXT("spawn_grid"), &SpawnGrid);
+	Registry.RegisterHandler(TEXT("batch_translate"), &BatchTranslate);
+	Registry.RegisterHandler(TEXT("place_actors_batch"), &PlaceActorsBatch);
 }
 
 TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>& Params)
@@ -186,24 +229,9 @@ TSharedPtr<FJsonValue> FLevelHandlers::PlaceActor(const TSharedPtr<FJsonObject>&
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 	const FString Label = OptionalString(Params, TEXT("label"));
 
-	// Idempotency: reuse an actor that already has this label.
-	if (!Label.IsEmpty())
+	if (auto Existing = MCPCheckActorLabelExists(World, Label, OnConflict, TEXT("Actor")))
 	{
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			if (It->GetActorLabel() == Label)
-			{
-				if (OnConflict == TEXT("error"))
-				{
-					return MCPError(FString::Printf(TEXT("Actor '%s' already exists"), *Label));
-				}
-				auto Existing = MCPSuccess();
-				MCPSetExisted(Existing);
-				Existing->SetStringField(TEXT("actorLabel"), Label);
-				Existing->SetStringField(TEXT("actorClass"), It->GetClass()->GetName());
-				return MCPResult(Existing);
-			}
-		}
+		return Existing;
 	}
 
 	UClass* Class = FindClassByShortName(ActorClass);
@@ -216,27 +244,9 @@ TSharedPtr<FJsonValue> FLevelHandlers::PlaceActor(const TSharedPtr<FJsonObject>&
 		return MCPError(FString::Printf(TEXT("Actor class not found: %s"), *ActorClass));
 	}
 
-	// Location
-	FVector Location = FVector::ZeroVector;
-	const TSharedPtr<FJsonObject>* LocationObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("location"), LocationObj))
-	{
-		(*LocationObj)->TryGetNumberField(TEXT("x"), Location.X);
-		(*LocationObj)->TryGetNumberField(TEXT("y"), Location.Y);
-		(*LocationObj)->TryGetNumberField(TEXT("z"), Location.Z);
-	}
+	const FVector Location = OptionalVec3(Params, TEXT("location"));
+	const FRotator Rotation = OptionalRotator(Params, TEXT("rotation"));
 
-	// Rotation
-	FRotator Rotation = FRotator::ZeroRotator;
-	const TSharedPtr<FJsonObject>* RotObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("rotation"), RotObj))
-	{
-		(*RotObj)->TryGetNumberField(TEXT("pitch"), Rotation.Pitch);
-		(*RotObj)->TryGetNumberField(TEXT("yaw"), Rotation.Yaw);
-		(*RotObj)->TryGetNumberField(TEXT("roll"), Rotation.Roll);
-	}
-
-	// Spawn
 	FTransform SpawnTransform(Rotation, Location);
 	AActor* NewActor = World->SpawnActor<AActor>(Class, SpawnTransform);
 	if (!NewActor)
@@ -249,15 +259,9 @@ TSharedPtr<FJsonValue> FLevelHandlers::PlaceActor(const TSharedPtr<FJsonObject>&
 		NewActor->SetActorLabel(Label);
 	}
 
-	// Scale
-	const TSharedPtr<FJsonObject>* ScaleObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("scale"), ScaleObj))
+	if (Params->HasField(TEXT("scale")))
 	{
-		FVector Scale = FVector::OneVector;
-		(*ScaleObj)->TryGetNumberField(TEXT("x"), Scale.X);
-		(*ScaleObj)->TryGetNumberField(TEXT("y"), Scale.Y);
-		(*ScaleObj)->TryGetNumberField(TEXT("z"), Scale.Z);
-		NewActor->SetActorScale3D(Scale);
+		NewActor->SetActorScale3D(OptionalVec3(Params, TEXT("scale"), FVector::OneVector));
 	}
 
 	// Static mesh shorthand
@@ -311,15 +315,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteActor(const TSharedPtr<FJsonObject>
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* ActorToDelete = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			ActorToDelete = *ActorIt;
-			break;
-		}
-	}
+	AActor* ActorToDelete = FindActorByLabel(World, ActorLabel);
 
 	// Idempotent: deleting a non-existent actor is a no-op, not an error.
 	if (!ActorToDelete)
@@ -372,13 +368,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObj
 		if (!World) return MCPError(TEXT("No editor world available"));
 	}
 
-	AActor* Actor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if (bHasPath && (*ActorIt)->GetPathName() == ActorPath) { Actor = *ActorIt; break; }
-		if (bHasLabel && (*ActorIt)->GetActorLabel() == ActorLabel) { Actor = *ActorIt; break; }
-	}
-
+	AActor* Actor = FindActorByLabelOrPath(World, bHasLabel ? ActorLabel : FString(), bHasPath ? ActorPath : FString());
 	if (!Actor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), bHasPath ? *ActorPath : *ActorLabel));
@@ -455,6 +445,258 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObj
 		Result->SetNumberField(TEXT("propertyCount"), PropsArr.Num());
 	}
 
+	return MCPResult(Result);
+}
+
+// #240/#241/#302/#320/#370/#353: deep component-tree introspection.
+//
+// Single call returns the actor's component list with all the inspection
+// data that previously required either a tower of blueprint.get_component_property
+// calls or a fall-back to execute_python with subclass-specific accessors.
+// Covers:
+//   - attach topology (parent + socket)
+//   - relative + world transforms
+//   - mobility + visibility
+//   - collision profile + enabled state for PrimitiveComponents
+//   - mesh path + override materials for StaticMesh / SkeletalMesh / SplineMesh
+//   - bounds (origin + extent) for PrimitiveComponents
+//   - tags
+//   - reflected UPROPERTY name/type/value when includeProperties=true
+TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonObject>& Params)
+{
+	FString ActorLabel;
+	FString ActorPath;
+	const bool bHasLabel = Params->TryGetStringField(TEXT("actorLabel"), ActorLabel);
+	const bool bHasPath = Params->TryGetStringField(TEXT("actorPath"), ActorPath);
+	if (!bHasLabel && !bHasPath)
+	{
+		return MCPError(TEXT("Missing 'actorLabel' or 'actorPath' parameter"));
+	}
+
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
+	UWorld* World = ResolveWorldScope(WorldScope);
+	if (!World)
+	{
+		return MCPError(FString::Printf(TEXT("World '%s' not available"), *WorldScope));
+	}
+
+	AActor* Actor = FindActorByLabelOrPath(World, bHasLabel ? ActorLabel : FString(), bHasPath ? ActorPath : FString());
+	if (!Actor)
+	{
+		return MCPError(FString::Printf(TEXT("Actor not found: %s"), bHasPath ? *ActorPath : *ActorLabel));
+	}
+
+	const bool bIncludeProperties = OptionalBool(Params, TEXT("includeProperties"));
+	const FString PropertyFilter = OptionalString(Params, TEXT("componentClass"));
+
+	TArray<UActorComponent*> Components;
+	Actor->GetComponents(Components);
+
+	TArray<TSharedPtr<FJsonValue>> CompArr;
+	for (UActorComponent* Comp : Components)
+	{
+		if (!Comp) continue;
+		if (!PropertyFilter.IsEmpty() && !Comp->GetClass()->GetName().Contains(PropertyFilter, ESearchCase::IgnoreCase)) continue;
+
+		TSharedPtr<FJsonObject> C = MakeShared<FJsonObject>();
+		C->SetStringField(TEXT("name"), Comp->GetName());
+		C->SetStringField(TEXT("class"), Comp->GetClass()->GetName());
+		C->SetBoolField(TEXT("isEditorOnly"), Comp->IsEditorOnly());
+
+		// Tags array
+		TArray<TSharedPtr<FJsonValue>> TagArr;
+		for (FName Tag : Comp->ComponentTags) { TagArr.Add(MakeShared<FJsonValueString>(Tag.ToString())); }
+		C->SetArrayField(TEXT("tags"), TagArr);
+
+		if (USceneComponent* SC = Cast<USceneComponent>(Comp))
+		{
+			// Attach topology
+			if (USceneComponent* AttachParent = SC->GetAttachParent())
+			{
+				C->SetStringField(TEXT("attachParent"), AttachParent->GetName());
+			}
+			const FName SocketName = SC->GetAttachSocketName();
+			if (SocketName != NAME_None)
+			{
+				C->SetStringField(TEXT("attachSocket"), SocketName.ToString());
+			}
+
+			// Visibility + mobility
+			C->SetBoolField(TEXT("bVisible"), SC->IsVisible());
+			switch (SC->Mobility)
+			{
+			case EComponentMobility::Static:     C->SetStringField(TEXT("mobility"), TEXT("Static")); break;
+			case EComponentMobility::Stationary: C->SetStringField(TEXT("mobility"), TEXT("Stationary")); break;
+			case EComponentMobility::Movable:    C->SetStringField(TEXT("mobility"), TEXT("Movable")); break;
+			default: break;
+			}
+
+			// Relative transform
+			const FVector RelLoc = SC->GetRelativeLocation();
+			const FRotator RelRot = SC->GetRelativeRotation();
+			const FVector RelScale = SC->GetRelativeScale3D();
+			auto MakeVec = [](const FVector& V) {
+				auto O = MakeShared<FJsonObject>();
+				O->SetNumberField(TEXT("x"), V.X);
+				O->SetNumberField(TEXT("y"), V.Y);
+				O->SetNumberField(TEXT("z"), V.Z);
+				return O;
+			};
+			auto MakeRot = [](const FRotator& R) {
+				auto O = MakeShared<FJsonObject>();
+				O->SetNumberField(TEXT("pitch"), R.Pitch);
+				O->SetNumberField(TEXT("yaw"), R.Yaw);
+				O->SetNumberField(TEXT("roll"), R.Roll);
+				return O;
+			};
+			C->SetObjectField(TEXT("relativeLocation"), MakeVec(RelLoc));
+			C->SetObjectField(TEXT("relativeRotation"), MakeRot(RelRot));
+			C->SetObjectField(TEXT("relativeScale"), MakeVec(RelScale));
+
+			// World transform
+			C->SetObjectField(TEXT("worldLocation"), MakeVec(SC->GetComponentLocation()));
+			C->SetObjectField(TEXT("worldRotation"), MakeRot(SC->GetComponentRotation()));
+			C->SetObjectField(TEXT("worldScale"), MakeVec(SC->GetComponentScale()));
+
+			if (UPrimitiveComponent* PC = Cast<UPrimitiveComponent>(SC))
+			{
+				// Collision profile
+				const FName CollisionProfile = PC->GetCollisionProfileName();
+				C->SetStringField(TEXT("collisionProfile"), CollisionProfile.ToString());
+				switch (PC->GetCollisionEnabled())
+				{
+				case ECollisionEnabled::NoCollision:        C->SetStringField(TEXT("collisionEnabled"), TEXT("NoCollision")); break;
+				case ECollisionEnabled::QueryOnly:          C->SetStringField(TEXT("collisionEnabled"), TEXT("QueryOnly")); break;
+				case ECollisionEnabled::PhysicsOnly:        C->SetStringField(TEXT("collisionEnabled"), TEXT("PhysicsOnly")); break;
+				case ECollisionEnabled::QueryAndPhysics:    C->SetStringField(TEXT("collisionEnabled"), TEXT("QueryAndPhysics")); break;
+				case ECollisionEnabled::ProbeOnly:          C->SetStringField(TEXT("collisionEnabled"), TEXT("ProbeOnly")); break;
+				case ECollisionEnabled::QueryAndProbe:      C->SetStringField(TEXT("collisionEnabled"), TEXT("QueryAndProbe")); break;
+				default: break;
+				}
+				C->SetBoolField(TEXT("castShadow"), PC->CastShadow);
+
+				// Bounds
+				const FBoxSphereBounds Bounds = PC->Bounds;
+				C->SetObjectField(TEXT("boundsOrigin"), MakeVec(Bounds.Origin));
+				C->SetObjectField(TEXT("boundsBoxExtent"), MakeVec(Bounds.BoxExtent));
+				C->SetNumberField(TEXT("boundsSphereRadius"), Bounds.SphereRadius);
+
+				// Material slots + meshes (mesh-component subclasses)
+				if (UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(PC))
+				{
+					if (UStaticMesh* Mesh = SMC->GetStaticMesh())
+					{
+						C->SetStringField(TEXT("staticMesh"), Mesh->GetPathName());
+					}
+					TArray<TSharedPtr<FJsonValue>> Mats;
+					const int32 NumMats = SMC->GetNumMaterials();
+					for (int32 i = 0; i < NumMats; i++)
+					{
+						UMaterialInterface* Mat = SMC->GetMaterial(i);
+						Mats.Add(MakeShared<FJsonValueString>(Mat ? Mat->GetPathName() : TEXT("")));
+					}
+					C->SetArrayField(TEXT("materials"), Mats);
+				}
+				else if (USkeletalMeshComponent* SKMC = Cast<USkeletalMeshComponent>(PC))
+				{
+					if (USkeletalMesh* Mesh = SKMC->GetSkeletalMeshAsset())
+					{
+						C->SetStringField(TEXT("skeletalMesh"), Mesh->GetPathName());
+					}
+					TArray<TSharedPtr<FJsonValue>> Mats;
+					const int32 NumMats = SKMC->GetNumMaterials();
+					for (int32 i = 0; i < NumMats; i++)
+					{
+						UMaterialInterface* Mat = SKMC->GetMaterial(i);
+						Mats.Add(MakeShared<FJsonValueString>(Mat ? Mat->GetPathName() : TEXT("")));
+					}
+					C->SetArrayField(TEXT("materials"), Mats);
+					if (USkeleton* Skel = SKMC->GetSkeletalMeshAsset() ? SKMC->GetSkeletalMeshAsset()->GetSkeleton() : nullptr)
+					{
+						C->SetStringField(TEXT("skeleton"), Skel->GetPathName());
+					}
+				}
+			}
+		}
+
+		if (bIncludeProperties)
+		{
+			TArray<TSharedPtr<FJsonValue>> Props;
+			for (TFieldIterator<FProperty> PIt(Comp->GetClass()); PIt; ++PIt)
+			{
+				FProperty* Prop = *PIt;
+				if (!Prop) continue;
+				// Skip uneditable / hidden flagged fields to keep the payload focused
+				// on values an agent would actually inspect.
+				if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient | CPF_DisableEditOnInstance)) continue;
+				TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
+				P->SetStringField(TEXT("name"), Prop->GetName());
+				P->SetStringField(TEXT("type"), Prop->GetCPPType());
+				FString ValueStr;
+				const void* VP = Prop->ContainerPtrToValuePtr<void>(Comp);
+				Prop->ExportText_Direct(ValueStr, VP, VP, Comp, PPF_None);
+				P->SetStringField(TEXT("value"), ValueStr);
+				Props.Add(MakeShared<FJsonValueObject>(P));
+			}
+			C->SetArrayField(TEXT("properties"), Props);
+		}
+
+		CompArr.Add(MakeShared<FJsonValueObject>(C));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+	Result->SetStringField(TEXT("actorClass"), Actor->GetClass()->GetName());
+	Result->SetNumberField(TEXT("componentCount"), CompArr.Num());
+	Result->SetArrayField(TEXT("components"), CompArr);
+	return MCPResult(Result);
+}
+
+// #386/#387: compute target's transform expressed in reference's local space.
+// Common dungeon/calibration workflow: figure out the local-space "snap rule"
+// for an actor that was manually aligned to a parent actor. Previously this
+// required execute_python with MathLibrary.inverse_transform_location.
+TSharedPtr<FJsonValue> FLevelHandlers::GetRelativeTransform(const TSharedPtr<FJsonObject>& Params)
+{
+	FString TargetLabel;
+	if (auto Err = RequireStringAlt(Params, TEXT("targetLabel"), TEXT("target"), TargetLabel)) return Err;
+	FString ReferenceLabel;
+	if (auto Err = RequireStringAlt(Params, TEXT("referenceLabel"), TEXT("reference"), ReferenceLabel)) return Err;
+
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
+	UWorld* World = ResolveWorldScope(WorldScope);
+	if (!World) return MCPError(FString::Printf(TEXT("World '%s' not available"), *WorldScope));
+
+	AActor* TargetActor = FindActorByLabel(World, TargetLabel);
+	AActor* ReferenceActor = FindActorByLabel(World, ReferenceLabel);
+	if (!TargetActor) return MCPError(FString::Printf(TEXT("Target actor not found: %s"), *TargetLabel));
+	if (!ReferenceActor) return MCPError(FString::Printf(TEXT("Reference actor not found: %s"), *ReferenceLabel));
+
+	const FTransform Target = TargetActor->GetActorTransform();
+	const FTransform Reference = ReferenceActor->GetActorTransform();
+	const FTransform Relative = Target.GetRelativeTransform(Reference);
+
+	auto MakeVec = [](const FVector& V) {
+		auto O = MakeShared<FJsonObject>();
+		O->SetNumberField(TEXT("x"), V.X);
+		O->SetNumberField(TEXT("y"), V.Y);
+		O->SetNumberField(TEXT("z"), V.Z);
+		return O;
+	};
+	auto MakeRot = [](const FRotator& R) {
+		auto O = MakeShared<FJsonObject>();
+		O->SetNumberField(TEXT("pitch"), R.Pitch);
+		O->SetNumberField(TEXT("yaw"), R.Yaw);
+		O->SetNumberField(TEXT("roll"), R.Roll);
+		return O;
+	};
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("targetLabel"), TargetLabel);
+	Result->SetStringField(TEXT("referenceLabel"), ReferenceLabel);
+	Result->SetObjectField(TEXT("location"), MakeVec(Relative.GetLocation()));
+	Result->SetObjectField(TEXT("rotation"), MakeRot(Relative.GetRotation().Rotator()));
+	Result->SetObjectField(TEXT("scale"), MakeVec(Relative.GetScale3D()));
 	return MCPResult(Result);
 }
 
@@ -552,48 +794,6 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetSelectedActors(const TSharedPtr<FJsonO
 
 	return MCPResult(Result);
 }
-
-TSharedPtr<FJsonValue> FLevelHandlers::ListVolumes(const TSharedPtr<FJsonObject>& Params)
-{
-	REQUIRE_EDITOR_WORLD(World);
-
-	FString VolumeType = OptionalString(Params, TEXT("volumeType"));
-
-	TArray<TSharedPtr<FJsonValue>> VolumesArray;
-	for (TActorIterator<AVolume> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		AVolume* Volume = *ActorIt;
-		if (!Volume) continue;
-
-		FString ClassName = Volume->GetClass()->GetName();
-		if (!VolumeType.IsEmpty() && !ClassName.Contains(VolumeType))
-		{
-			continue;
-		}
-
-		TSharedPtr<FJsonObject> VolumeObj = MakeShared<FJsonObject>();
-		VolumeObj->SetStringField(TEXT("name"), Volume->GetName());
-		VolumeObj->SetStringField(TEXT("label"), Volume->GetActorLabel());
-		VolumeObj->SetStringField(TEXT("class"), ClassName);
-		VolumeObj->SetStringField(TEXT("path"), Volume->GetPathName());
-
-		FVector Location = Volume->GetActorLocation();
-		TSharedPtr<FJsonObject> LocObj = MakeShared<FJsonObject>();
-		LocObj->SetNumberField(TEXT("x"), Location.X);
-		LocObj->SetNumberField(TEXT("y"), Location.Y);
-		LocObj->SetNumberField(TEXT("z"), Location.Z);
-		VolumeObj->SetObjectField(TEXT("location"), LocObj);
-
-		VolumesArray.Add(MakeShared<FJsonValueObject>(VolumeObj));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetArrayField(TEXT("volumes"), VolumesArray);
-	Result->SetNumberField(TEXT("count"), VolumesArray.Num());
-
-	return MCPResult(Result);
-}
-
 TSharedPtr<FJsonValue> FLevelHandlers::MoveActor(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
@@ -601,17 +801,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::MoveActor(const TSharedPtr<FJsonObject>& 
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	// Find actor by label
-	AActor* Actor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			Actor = *ActorIt;
-			break;
-		}
-	}
-
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
 	if (!Actor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
@@ -622,79 +812,32 @@ TSharedPtr<FJsonValue> FLevelHandlers::MoveActor(const TSharedPtr<FJsonObject>& 
 	const FRotator PreviousRotation = Actor->GetActorRotation();
 	const FVector PreviousScale = Actor->GetActorScale3D();
 
-	const TSharedPtr<FJsonObject>* LocObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("location"), LocObj))
+	if (Params->HasField(TEXT("location")))
 	{
-		FVector Location = Actor->GetActorLocation();
-		(*LocObj)->TryGetNumberField(TEXT("x"), Location.X);
-		(*LocObj)->TryGetNumberField(TEXT("y"), Location.Y);
-		(*LocObj)->TryGetNumberField(TEXT("z"), Location.Z);
-		Actor->SetActorLocation(Location);
+		Actor->SetActorLocation(OptionalVec3(Params, TEXT("location"), Actor->GetActorLocation()));
 	}
-
-	const TSharedPtr<FJsonObject>* RotObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("rotation"), RotObj))
+	if (Params->HasField(TEXT("rotation")))
 	{
-		FRotator Rotation = Actor->GetActorRotation();
-		(*RotObj)->TryGetNumberField(TEXT("pitch"), Rotation.Pitch);
-		(*RotObj)->TryGetNumberField(TEXT("yaw"), Rotation.Yaw);
-		(*RotObj)->TryGetNumberField(TEXT("roll"), Rotation.Roll);
-		Actor->SetActorRotation(Rotation);
+		Actor->SetActorRotation(OptionalRotator(Params, TEXT("rotation"), Actor->GetActorRotation()));
 	}
-
-	const TSharedPtr<FJsonObject>* ScaleObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("scale"), ScaleObj))
+	if (Params->HasField(TEXT("scale")))
 	{
-		FVector Scale = Actor->GetActorScale3D();
-		(*ScaleObj)->TryGetNumberField(TEXT("x"), Scale.X);
-		(*ScaleObj)->TryGetNumberField(TEXT("y"), Scale.Y);
-		(*ScaleObj)->TryGetNumberField(TEXT("z"), Scale.Z);
-		Actor->SetActorScale3D(Scale);
+		Actor->SetActorScale3D(OptionalVec3(Params, TEXT("scale"), Actor->GetActorScale3D()));
 	}
-
-	FVector NewLocation = Actor->GetActorLocation();
-	TSharedPtr<FJsonObject> NewLocationObj = MakeShared<FJsonObject>();
-	NewLocationObj->SetNumberField(TEXT("x"), NewLocation.X);
-	NewLocationObj->SetNumberField(TEXT("y"), NewLocation.Y);
-	NewLocationObj->SetNumberField(TEXT("z"), NewLocation.Z);
-
-	FRotator NewRotation = Actor->GetActorRotation();
-	TSharedPtr<FJsonObject> NewRotationObj = MakeShared<FJsonObject>();
-	NewRotationObj->SetNumberField(TEXT("pitch"), NewRotation.Pitch);
-	NewRotationObj->SetNumberField(TEXT("yaw"), NewRotation.Yaw);
-	NewRotationObj->SetNumberField(TEXT("roll"), NewRotation.Roll);
-
-	FVector NewScale = Actor->GetActorScale3D();
-	TSharedPtr<FJsonObject> NewScaleObj = MakeShared<FJsonObject>();
-	NewScaleObj->SetNumberField(TEXT("x"), NewScale.X);
-	NewScaleObj->SetNumberField(TEXT("y"), NewScale.Y);
-	NewScaleObj->SetNumberField(TEXT("z"), NewScale.Z);
 
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
-	Result->SetObjectField(TEXT("location"), NewLocationObj);
-	Result->SetObjectField(TEXT("rotation"), NewRotationObj);
-	Result->SetObjectField(TEXT("scale"), NewScaleObj);
+	Result->SetObjectField(TEXT("location"), MCPVec3ToJsonObject(Actor->GetActorLocation()));
+	Result->SetObjectField(TEXT("rotation"), MCPRotatorToJsonObject(Actor->GetActorRotation()));
+	Result->SetObjectField(TEXT("scale"), MCPVec3ToJsonObject(Actor->GetActorScale3D()));
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
 
 	// Self-inverse: call move_actor with previous transform.
-	TSharedPtr<FJsonObject> PrevLoc = MakeShared<FJsonObject>();
-	PrevLoc->SetNumberField(TEXT("x"), PreviousLocation.X);
-	PrevLoc->SetNumberField(TEXT("y"), PreviousLocation.Y);
-	PrevLoc->SetNumberField(TEXT("z"), PreviousLocation.Z);
-	TSharedPtr<FJsonObject> PrevRot = MakeShared<FJsonObject>();
-	PrevRot->SetNumberField(TEXT("pitch"), PreviousRotation.Pitch);
-	PrevRot->SetNumberField(TEXT("yaw"), PreviousRotation.Yaw);
-	PrevRot->SetNumberField(TEXT("roll"), PreviousRotation.Roll);
-	TSharedPtr<FJsonObject> PrevScale = MakeShared<FJsonObject>();
-	PrevScale->SetNumberField(TEXT("x"), PreviousScale.X);
-	PrevScale->SetNumberField(TEXT("y"), PreviousScale.Y);
-	PrevScale->SetNumberField(TEXT("z"), PreviousScale.Z);
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
-	Payload->SetObjectField(TEXT("location"), PrevLoc);
-	Payload->SetObjectField(TEXT("rotation"), PrevRot);
-	Payload->SetObjectField(TEXT("scale"), PrevScale);
+	Payload->SetObjectField(TEXT("location"), MCPVec3ToJsonObject(PreviousLocation));
+	Payload->SetObjectField(TEXT("rotation"), MCPRotatorToJsonObject(PreviousRotation));
+	Payload->SetObjectField(TEXT("scale"), MCPVec3ToJsonObject(PreviousScale));
 	MCPSetRollback(Result, TEXT("move_actor"), Payload);
 
 	return MCPResult(Result);
@@ -719,20 +862,12 @@ TSharedPtr<FJsonValue> FLevelHandlers::SelectActors(const TSharedPtr<FJsonObject
 	for (const TSharedPtr<FJsonValue>& LabelValue : *ActorLabelsArray)
 	{
 		FString Label = LabelValue->AsString();
-		bool bFound = false;
-
-		for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
+		if (AActor* Match = FindActorByLabel(World, Label))
 		{
-			if ((*ActorIt)->GetActorLabel() == Label)
-			{
-				GEditor->SelectActor(*ActorIt, true, true, true);
-				SelectedArray.Add(MakeShared<FJsonValueString>(Label));
-				bFound = true;
-				break;
-			}
+			GEditor->SelectActor(Match, true, true, true);
+			SelectedArray.Add(MakeShared<FJsonValueString>(Label));
 		}
-
-		if (!bFound)
+		else
 		{
 			NotFoundArray.Add(MakeShared<FJsonValueString>(Label));
 		}
@@ -745,333 +880,6 @@ TSharedPtr<FJsonValue> FLevelHandlers::SelectActors(const TSharedPtr<FJsonObject
 
 	return MCPResult(Result);
 }
-
-TSharedPtr<FJsonValue> FLevelHandlers::SpawnLight(const TSharedPtr<FJsonObject>& Params)
-{
-	FString LightType;
-	if (auto Err = RequireString(Params, TEXT("lightType"), LightType)) return Err;
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
-	const FString Label = OptionalString(Params, TEXT("label"));
-
-	// Idempotency by label.
-	if (!Label.IsEmpty())
-	{
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			if (It->GetActorLabel() == Label)
-			{
-				if (OnConflict == TEXT("error"))
-				{
-					return MCPError(FString::Printf(TEXT("Light '%s' already exists"), *Label));
-				}
-				auto Existing = MCPSuccess();
-				MCPSetExisted(Existing);
-				Existing->SetStringField(TEXT("actorLabel"), Label);
-				Existing->SetStringField(TEXT("lightType"), LightType);
-				return MCPResult(Existing);
-			}
-		}
-	}
-
-	FVector Location = FVector::ZeroVector;
-	const TSharedPtr<FJsonObject>* LocationObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("location"), LocationObj))
-	{
-		(*LocationObj)->TryGetNumberField(TEXT("x"), Location.X);
-		(*LocationObj)->TryGetNumberField(TEXT("y"), Location.Y);
-		(*LocationObj)->TryGetNumberField(TEXT("z"), Location.Z);
-	}
-
-	double Intensity = OptionalNumber(Params, TEXT("intensity"), 5000.0);
-
-	UClass* LightClass = nullptr;
-	if (LightType.Equals(TEXT("point"), ESearchCase::IgnoreCase))
-	{
-		LightClass = APointLight::StaticClass();
-	}
-	else if (LightType.Equals(TEXT("spot"), ESearchCase::IgnoreCase))
-	{
-		LightClass = ASpotLight::StaticClass();
-	}
-	else if (LightType.Equals(TEXT("directional"), ESearchCase::IgnoreCase))
-	{
-		LightClass = ADirectionalLight::StaticClass();
-	}
-	else if (LightType.Equals(TEXT("rect"), ESearchCase::IgnoreCase))
-	{
-		LightClass = ARectLight::StaticClass();
-	}
-	else
-	{
-		return MCPError(FString::Printf(TEXT("Unknown light type: %s. Use point, spot, directional, or rect."), *LightType));
-	}
-
-	FTransform LightTransform(FRotator::ZeroRotator, Location);
-	AActor* NewLight = World->SpawnActor<AActor>(LightClass, LightTransform);
-	if (!NewLight)
-	{
-		return MCPError(TEXT("Failed to spawn light actor"));
-	}
-
-	if (!Label.IsEmpty())
-	{
-		NewLight->SetActorLabel(Label);
-	}
-
-	ULightComponent* LightComponent = NewLight->FindComponentByClass<ULightComponent>();
-	if (LightComponent)
-	{
-		LightComponent->SetIntensity(Intensity);
-	}
-
-	const FString FinalLabel = NewLight->GetActorLabel();
-
-	auto Result = MCPSuccess();
-	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("actorLabel"), FinalLabel);
-	Result->SetStringField(TEXT("actorName"), NewLight->GetName());
-	Result->SetStringField(TEXT("lightType"), LightType);
-
-	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("actorLabel"), FinalLabel);
-	MCPSetRollback(Result, TEXT("delete_actor"), Payload);
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FLevelHandlers::SetLightProperties(const TSharedPtr<FJsonObject>& Params)
-{
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Find actor by label
-	AActor* Actor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			Actor = *ActorIt;
-			break;
-		}
-	}
-
-	if (!Actor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
-
-	ULightComponent* LightComponent = Actor->FindComponentByClass<ULightComponent>();
-	if (!LightComponent)
-	{
-		return MCPError(FString::Printf(TEXT("Actor '%s' does not have a light component"), *ActorLabel));
-	}
-
-	// Capture previous values before mutation for self-inverse rollback.
-	const double PreviousIntensity = LightComponent->Intensity;
-	const FLinearColor PreviousColor = LightComponent->GetLightColor();
-	const FRotator PreviousRotation = Actor->GetActorRotation();
-
-	bool bAnyChange = false;
-
-	double Intensity = 0.0;
-	if (Params->TryGetNumberField(TEXT("intensity"), Intensity))
-	{
-		LightComponent->SetIntensity(Intensity);
-		bAnyChange = true;
-	}
-
-	const TSharedPtr<FJsonObject>* ColorObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("color"), ColorObj))
-	{
-		double R = 255.0, G = 255.0, B = 255.0;
-		(*ColorObj)->TryGetNumberField(TEXT("r"), R);
-		(*ColorObj)->TryGetNumberField(TEXT("g"), G);
-		(*ColorObj)->TryGetNumberField(TEXT("b"), B);
-		LightComponent->SetLightColor(FLinearColor(R / 255.0f, G / 255.0f, B / 255.0f));
-		bAnyChange = true;
-	}
-
-	// #94: DirectionalLight rotation support (sun angle for time-of-day)
-	const TSharedPtr<FJsonObject>* RotObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("rotation"), RotObj))
-	{
-		double Pitch = 0.0, Yaw = 0.0, Roll = 0.0;
-		(*RotObj)->TryGetNumberField(TEXT("pitch"), Pitch);
-		(*RotObj)->TryGetNumberField(TEXT("yaw"), Yaw);
-		(*RotObj)->TryGetNumberField(TEXT("roll"), Roll);
-		Actor->SetActorRotation(FRotator((float)Pitch, (float)Yaw, (float)Roll));
-		bAnyChange = true;
-	}
-
-	// #94: SkyLight recapture after intensity/color change
-	if (USkyLightComponent* Sky = Cast<USkyLightComponent>(LightComponent))
-	{
-		bool bRecapture = false;
-		Params->TryGetBoolField(TEXT("recaptureSky"), bRecapture);
-		if (bRecapture || bAnyChange)
-		{
-			Sky->RecaptureSky();
-		}
-	}
-
-	auto Result = MCPSuccess();
-	MCPSetUpdated(Result);
-	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
-	Result->SetNumberField(TEXT("intensity"), LightComponent->Intensity);
-
-	FLinearColor CurrentColor = LightComponent->GetLightColor();
-	TSharedPtr<FJsonObject> ColorResult = MakeShared<FJsonObject>();
-	ColorResult->SetNumberField(TEXT("r"), CurrentColor.R * 255.0f);
-	ColorResult->SetNumberField(TEXT("g"), CurrentColor.G * 255.0f);
-	ColorResult->SetNumberField(TEXT("b"), CurrentColor.B * 255.0f);
-	Result->SetObjectField(TEXT("color"), ColorResult);
-
-	if (bAnyChange)
-	{
-		TSharedPtr<FJsonObject> PrevColor = MakeShared<FJsonObject>();
-		PrevColor->SetNumberField(TEXT("r"), PreviousColor.R * 255.0f);
-		PrevColor->SetNumberField(TEXT("g"), PreviousColor.G * 255.0f);
-		PrevColor->SetNumberField(TEXT("b"), PreviousColor.B * 255.0f);
-		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-		Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
-		Payload->SetNumberField(TEXT("intensity"), PreviousIntensity);
-		Payload->SetObjectField(TEXT("color"), PrevColor);
-		MCPSetRollback(Result, TEXT("set_light_properties"), Payload);
-	}
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FLevelHandlers::SpawnVolume(const TSharedPtr<FJsonObject>& Params)
-{
-	FString VolumeType;
-	if (auto Err = RequireString(Params, TEXT("volumeType"), VolumeType)) return Err;
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
-	const FString Label = OptionalString(Params, TEXT("label"));
-
-	// Idempotency by label.
-	if (!Label.IsEmpty())
-	{
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			if (It->GetActorLabel() == Label)
-			{
-				if (OnConflict == TEXT("error"))
-				{
-					return MCPError(FString::Printf(TEXT("Volume '%s' already exists"), *Label));
-				}
-				auto Existing = MCPSuccess();
-				MCPSetExisted(Existing);
-				Existing->SetStringField(TEXT("actorLabel"), Label);
-				Existing->SetStringField(TEXT("volumeType"), VolumeType);
-				return MCPResult(Existing);
-			}
-		}
-	}
-
-	// Get location
-	FVector Location = FVector::ZeroVector;
-	const TSharedPtr<FJsonObject>* LocationObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("location"), LocationObj))
-	{
-		(*LocationObj)->TryGetNumberField(TEXT("x"), Location.X);
-		(*LocationObj)->TryGetNumberField(TEXT("y"), Location.Y);
-		(*LocationObj)->TryGetNumberField(TEXT("z"), Location.Z);
-	}
-
-	// Get extent
-	FVector Extent = FVector(100.0, 100.0, 100.0);
-	const TSharedPtr<FJsonObject>* ExtentObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("extent"), ExtentObj))
-	{
-		(*ExtentObj)->TryGetNumberField(TEXT("x"), Extent.X);
-		(*ExtentObj)->TryGetNumberField(TEXT("y"), Extent.Y);
-		(*ExtentObj)->TryGetNumberField(TEXT("z"), Extent.Z);
-	}
-
-	// Determine volume class
-	UClass* VolumeClass = nullptr;
-	if (VolumeType.Equals(TEXT("BlockingVolume"), ESearchCase::IgnoreCase) || VolumeType.Equals(TEXT("blocking"), ESearchCase::IgnoreCase))
-	{
-		VolumeClass = ABlockingVolume::StaticClass();
-	}
-	else if (VolumeType.Equals(TEXT("TriggerVolume"), ESearchCase::IgnoreCase) || VolumeType.Equals(TEXT("trigger"), ESearchCase::IgnoreCase))
-	{
-		VolumeClass = ATriggerVolume::StaticClass();
-	}
-	else if (VolumeType.Equals(TEXT("PostProcessVolume"), ESearchCase::IgnoreCase) || VolumeType.Equals(TEXT("postprocess"), ESearchCase::IgnoreCase))
-	{
-		VolumeClass = APostProcessVolume::StaticClass();
-	}
-	else if (VolumeType.Equals(TEXT("AudioVolume"), ESearchCase::IgnoreCase) || VolumeType.Equals(TEXT("audio"), ESearchCase::IgnoreCase))
-	{
-		VolumeClass = AAudioVolume::StaticClass();
-	}
-	else if (VolumeType.Equals(TEXT("LightmassImportanceVolume"), ESearchCase::IgnoreCase) || VolumeType.Equals(TEXT("lightmass"), ESearchCase::IgnoreCase))
-	{
-		VolumeClass = ALightmassImportanceVolume::StaticClass();
-	}
-	else if (VolumeType.Equals(TEXT("CullDistanceVolume"), ESearchCase::IgnoreCase) || VolumeType.Equals(TEXT("culldistance"), ESearchCase::IgnoreCase))
-	{
-		VolumeClass = FindClassByShortName(TEXT("CullDistanceVolume"));
-	}
-	else if (VolumeType.Equals(TEXT("NavMeshBoundsVolume"), ESearchCase::IgnoreCase) || VolumeType.Equals(TEXT("navmesh"), ESearchCase::IgnoreCase))
-	{
-		VolumeClass = ANavMeshBoundsVolume::StaticClass();
-	}
-	else if (VolumeType.Equals(TEXT("PainCausingVolume"), ESearchCase::IgnoreCase) || VolumeType.Equals(TEXT("pain"), ESearchCase::IgnoreCase))
-	{
-		VolumeClass = APainCausingVolume::StaticClass();
-	}
-	else
-	{
-		// Try broad class lookup
-		VolumeClass = FindClassByShortName(VolumeType);
-	}
-
-	if (!VolumeClass)
-	{
-		return MCPError(FString::Printf(TEXT("Volume class not found: %s"), *VolumeType));
-	}
-
-	FTransform VolumeTransform(FRotator::ZeroRotator, Location);
-	AActor* NewVolume = World->SpawnActor<AActor>(VolumeClass, VolumeTransform);
-	if (!NewVolume)
-	{
-		return MCPError(TEXT("Failed to spawn volume actor"));
-	}
-
-	if (!Label.IsEmpty())
-	{
-		NewVolume->SetActorLabel(Label);
-	}
-
-	// Set scale based on extent
-	NewVolume->SetActorScale3D(Extent / 100.0);
-
-	const FString FinalLabel = NewVolume->GetActorLabel();
-
-	auto Result = MCPSuccess();
-	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("actorLabel"), FinalLabel);
-	Result->SetStringField(TEXT("actorName"), NewVolume->GetName());
-	Result->SetStringField(TEXT("volumeType"), VolumeType);
-
-	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("actorLabel"), FinalLabel);
-	MCPSetRollback(Result, TEXT("delete_actor"), Payload);
-
-	return MCPResult(Result);
-}
-
 TSharedPtr<FJsonValue> FLevelHandlers::AddComponentToActor(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
@@ -1087,16 +895,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddComponentToActor(const TSharedPtr<FJso
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* Actor = nullptr;
-	for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
-	{
-		if ((*ActorIt)->GetActorLabel() == ActorLabel)
-		{
-			Actor = *ActorIt;
-			break;
-		}
-	}
-
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
 	if (!Actor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
@@ -1167,8 +966,57 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddComponentToActor(const TSharedPtr<FJso
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
 	Result->SetStringField(TEXT("componentName"), ComponentName);
 	Result->SetStringField(TEXT("componentClass"), NewComponent->GetClass()->GetName());
-	// No generic remove-instance-component handler exists yet; not emitting a
-	// rollback record. Adding one later will make this reversible.
+
+	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Payload->SetStringField(TEXT("componentName"), ComponentName);
+	MCPSetRollback(Result, TEXT("remove_component_from_actor"), Payload);
+	return MCPResult(Result);
+}
+
+// #426: symmetric remove of an instance component. Idempotent (returns
+// alreadyDeleted=true when the actor has no component with that name).
+TSharedPtr<FJsonValue> FLevelHandlers::RemoveComponentFromActor(const TSharedPtr<FJsonObject>& Params)
+{
+	FString ActorLabel;
+	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	FString ComponentName;
+	if (auto Err = RequireString(Params, TEXT("componentName"), ComponentName)) return Err;
+
+	REQUIRE_EDITOR_WORLD(World);
+
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
+	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	const FName CompName(*ComponentName);
+	UActorComponent* Target = nullptr;
+	for (UActorComponent* Comp : Actor->GetComponents())
+	{
+		if (Comp && Comp->GetFName() == CompName) { Target = Comp; break; }
+	}
+
+	if (!Target)
+	{
+		auto Noop = MCPSuccess();
+		Noop->SetStringField(TEXT("actorLabel"), ActorLabel);
+		Noop->SetStringField(TEXT("componentName"), ComponentName);
+		Noop->SetBoolField(TEXT("alreadyDeleted"), true);
+		return MCPResult(Noop);
+	}
+
+	const FString ComponentClass = Target->GetClass()->GetName();
+	Actor->Modify();
+	Target->Modify();
+	Actor->RemoveInstanceComponent(Target);
+	Target->DestroyComponent();
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("componentName"), ComponentName);
+	Result->SetStringField(TEXT("componentClass"), ComponentClass);
+	Result->SetBoolField(TEXT("deleted"), true);
+	// Removing an instance component is not symmetrically reversible without a
+	// snapshot of its property state. No rollback record emitted by default.
 	return MCPResult(Result);
 }
 
@@ -1204,76 +1052,6 @@ TSharedPtr<FJsonValue> FLevelHandlers::LoadLevel(const TSharedPtr<FJsonObject>& 
 	return MCPResult(Result);
 }
 
-TSharedPtr<FJsonValue> FLevelHandlers::SaveLevel(const TSharedPtr<FJsonObject>& Params)
-{
-	REQUIRE_EDITOR_WORLD(World);
-
-	// Use the LevelEditorSubsystem to save the current level
-	ULevelEditorSubsystem* LevelEditorSubsystem = GEditor->GetEditorSubsystem<ULevelEditorSubsystem>();
-	if (!LevelEditorSubsystem)
-	{
-		return MCPError(TEXT("LevelEditorSubsystem not available"));
-	}
-
-	bool bSuccess = LevelEditorSubsystem->SaveCurrentLevel();
-
-	if (!bSuccess)
-	{
-		return MCPError(TEXT("Failed to save current level"));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("levelName"), World->GetName());
-	Result->SetStringField(TEXT("levelPath"), World->GetPathName());
-
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FLevelHandlers::ListSublevels(const TSharedPtr<FJsonObject>& Params)
-{
-	REQUIRE_EDITOR_WORLD(World);
-
-	TArray<TSharedPtr<FJsonValue>> SublevelsArray;
-
-	// Iterate streaming/sublevels
-	const TArray<ULevelStreaming*>& StreamingLevels = World->GetStreamingLevels();
-	for (ULevelStreaming* StreamingLevel : StreamingLevels)
-	{
-		if (!StreamingLevel) continue;
-
-		TSharedPtr<FJsonObject> LevelObj = MakeShared<FJsonObject>();
-		LevelObj->SetStringField(TEXT("packageName"), StreamingLevel->GetWorldAssetPackageFName().ToString());
-		LevelObj->SetStringField(TEXT("class"), StreamingLevel->GetClass()->GetName());
-		LevelObj->SetBoolField(TEXT("isLoaded"), StreamingLevel->IsLevelLoaded());
-		LevelObj->SetBoolField(TEXT("isVisible"), StreamingLevel->IsLevelVisible());
-		LevelObj->SetBoolField(TEXT("shouldBeLoaded"), StreamingLevel->HasLoadRequestPending() || StreamingLevel->IsLevelLoaded());
-
-		// Get streaming level transform
-		FTransform LevelTransform = StreamingLevel->LevelTransform;
-		TSharedPtr<FJsonObject> TransformObj = MakeShared<FJsonObject>();
-		FVector Location = LevelTransform.GetLocation();
-		TransformObj->SetNumberField(TEXT("x"), Location.X);
-		TransformObj->SetNumberField(TEXT("y"), Location.Y);
-		TransformObj->SetNumberField(TEXT("z"), Location.Z);
-		LevelObj->SetObjectField(TEXT("location"), TransformObj);
-
-		// Actor count if loaded
-		if (StreamingLevel->IsLevelLoaded() && StreamingLevel->GetLoadedLevel())
-		{
-			LevelObj->SetNumberField(TEXT("actorCount"), StreamingLevel->GetLoadedLevel()->Actors.Num());
-		}
-
-		SublevelsArray.Add(MakeShared<FJsonValueObject>(LevelObj));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("persistentLevel"), World->GetName());
-	Result->SetArrayField(TEXT("sublevels"), SublevelsArray);
-	Result->SetNumberField(TEXT("count"), SublevelsArray.Num());
-
-	return MCPResult(Result);
-}
-
 TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
@@ -1286,16 +1064,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* TargetActor = nullptr;
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		if (It->GetActorLabel() == ActorLabel)
-		{
-			TargetActor = *It;
-			break;
-		}
-	}
-
+	AActor* TargetActor = FindActorByLabel(World, ActorLabel);
 	if (!TargetActor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
@@ -1340,10 +1109,56 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 		return MCPError(FString::Printf(TEXT("Component '%s' not found on actor '%s'"), *ComponentName, *ActorLabel));
 	}
 
-	FProperty* Prop = TargetComp->GetClass()->FindPropertyByName(*PropertyName);
-	if (!Prop)
+	// #216: walk dotted property paths so callers can write
+	// "GraphInstance.Graph" without us silently no-oping at the top level.
+	TArray<FString> PathParts;
+	PropertyName.ParseIntoArray(PathParts, TEXT("."));
+	if (PathParts.Num() == 0)
 	{
-		return MCPError(FString::Printf(TEXT("Property '%s' not found on component"), *PropertyName));
+		return MCPError(TEXT("Empty propertyName"));
+	}
+
+	UStruct* CurrentStruct = TargetComp->GetClass();
+	void* CurrentContainer = TargetComp;
+	FProperty* Prop = nullptr;
+	for (int32 i = 0; i < PathParts.Num(); ++i)
+	{
+		FProperty* SegmentProp = CurrentStruct->FindPropertyByName(FName(*PathParts[i]));
+		if (!SegmentProp)
+		{
+			return MCPError(FString::Printf(TEXT("Property '%s' not found at '%s'"), *PathParts[i], *PropertyName));
+		}
+		if (i < PathParts.Num() - 1)
+		{
+			if (FStructProperty* SP = CastField<FStructProperty>(SegmentProp))
+			{
+				CurrentContainer = SP->ContainerPtrToValuePtr<void>(CurrentContainer);
+				CurrentStruct = SP->Struct;
+			}
+			else if (FObjectProperty* OP = CastField<FObjectProperty>(SegmentProp))
+			{
+				// #305: descend through Instanced UObject sub-objects.
+				UObject* SubObject = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(CurrentContainer));
+				if (!SubObject)
+				{
+					return MCPError(FString::Printf(
+						TEXT("Cannot descend into '%s' - the sub-object reference is null"),
+						*PathParts[i]));
+				}
+				SubObject->Modify();
+				CurrentContainer = SubObject;
+				CurrentStruct = SubObject->GetClass();
+			}
+			else
+			{
+				return MCPError(FString::Printf(
+					TEXT("'%s' is not a struct or sub-object - cannot descend"), *PathParts[i]));
+			}
+		}
+		else
+		{
+			Prop = SegmentProp;
+		}
 	}
 
 	const TSharedPtr<FJsonValue>* ValueField = Params->Values.Find(TEXT("value"));
@@ -1352,10 +1167,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 		return MCPError(TEXT("Missing 'value' parameter"));
 	}
 
+	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CurrentContainer);
+
 	// Capture previous value as a string for self-inverse rollback.
 	FString PreviousValueStr;
-	Prop->ExportText_Direct(PreviousValueStr, Prop->ContainerPtrToValuePtr<void>(TargetComp),
-		Prop->ContainerPtrToValuePtr<void>(TargetComp), TargetComp, PPF_None);
+	Prop->ExportText_Direct(PreviousValueStr, ValuePtr, ValuePtr, TargetComp, PPF_None);
 
 	FString ValueStr;
 	if ((*ValueField)->TryGetString(ValueStr))
@@ -1388,15 +1204,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 						// Skip obvious non-identifiers
 						if (Token != TEXT("True") && Token != TEXT("False") && Token != TEXT("None") && !Token.IsNumeric())
 						{
-							// Try to resolve as actor label
-							for (TActorIterator<AActor> It(World); It; ++It)
+							if (AActor* Resolved = FindActorByLabel(World, Token))
 							{
-								if (It->GetActorLabel() == Token)
-								{
-									Result.Append(It->GetPathName());
-									i = End;
-									goto AppendDone;
-								}
+								Result.Append(Resolved->GetPathName());
+								i = End;
+								goto AppendDone;
 							}
 						}
 					}
@@ -1406,7 +1218,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 			}
 			ValueStr = Result;
 		}
-		Prop->ImportText_Direct(*ValueStr, Prop->ContainerPtrToValuePtr<void>(TargetComp), TargetComp, PPF_None);
+		Prop->ImportText_Direct(*ValueStr, ValuePtr, TargetComp, PPF_None);
 	}
 	else
 	{
@@ -1414,7 +1226,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 		if ((*ValueField)->TryGetNumber(NumValue))
 		{
 			ValueStr = FString::SanitizeFloat(NumValue);
-			Prop->ImportText_Direct(*ValueStr, Prop->ContainerPtrToValuePtr<void>(TargetComp), TargetComp, PPF_None);
+			Prop->ImportText_Direct(*ValueStr, ValuePtr, TargetComp, PPF_None);
 		}
 		else
 		{
@@ -1422,7 +1234,17 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 			if ((*ValueField)->TryGetBool(BoolValue))
 			{
 				ValueStr = BoolValue ? TEXT("true") : TEXT("false");
-				Prop->ImportText_Direct(*ValueStr, Prop->ContainerPtrToValuePtr<void>(TargetComp), TargetComp, PPF_None);
+				Prop->ImportText_Direct(*ValueStr, ValuePtr, TargetComp, PPF_None);
+			}
+			else
+			{
+				// #216: structured JSON values (objects/arrays). Drives UObject
+				// asset paths, FVector {x,y,z}, nested struct fields, etc.
+				FString SetErr;
+				if (!MCPJsonProperty::SetJsonOnProperty(Prop, ValuePtr, *ValueField, SetErr))
+				{
+					return MCPError(FString::Printf(TEXT("Failed to set '%s': %s"), *PropertyName, *SetErr));
+				}
 			}
 		}
 	}
@@ -1446,89 +1268,6 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 
 	return MCPResult(Result);
 }
-
-TSharedPtr<FJsonValue> FLevelHandlers::SetVolumeProperties(const TSharedPtr<FJsonObject>& Params)
-{
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-
-	REQUIRE_EDITOR_WORLD(World);
-
-	AActor* TargetActor = nullptr;
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		if (It->GetActorLabel() == ActorLabel || It->GetName() == ActorLabel)
-		{
-			TargetActor = *It;
-			break;
-		}
-	}
-
-	if (!TargetActor)
-	{
-		return MCPError(FString::Printf(TEXT("Volume not found: %s"), *ActorLabel));
-	}
-
-	TArray<TSharedPtr<FJsonValue>> Changes;
-	TSharedPtr<FJsonObject> PreviousValues = MakeShared<FJsonObject>();
-	for (auto& Pair : Params->Values)
-	{
-		if (Pair.Key == TEXT("actorLabel") || Pair.Key == TEXT("action"))
-			continue;
-
-		FProperty* Prop = TargetActor->GetClass()->FindPropertyByName(*Pair.Key);
-		if (Prop)
-		{
-			FString PrevStr;
-			Prop->ExportText_Direct(PrevStr, Prop->ContainerPtrToValuePtr<void>(TargetActor),
-				Prop->ContainerPtrToValuePtr<void>(TargetActor), TargetActor, PPF_None);
-
-			FString ValueStr;
-			bool bApplied = false;
-			if (Pair.Value->TryGetString(ValueStr))
-			{
-				Prop->ImportText_Direct(*ValueStr, Prop->ContainerPtrToValuePtr<void>(TargetActor), TargetActor, PPF_None);
-				bApplied = true;
-			}
-			else
-			{
-				double NumVal;
-				if (Pair.Value->TryGetNumber(NumVal))
-				{
-					ValueStr = FString::SanitizeFloat(NumVal);
-					Prop->ImportText_Direct(*ValueStr, Prop->ContainerPtrToValuePtr<void>(TargetActor), TargetActor, PPF_None);
-					bApplied = true;
-				}
-			}
-
-			if (bApplied)
-			{
-				Changes.Add(MakeShared<FJsonValueString>(Pair.Key));
-				PreviousValues->SetStringField(Pair.Key, PrevStr);
-			}
-		}
-	}
-
-	auto Result = MCPSuccess();
-	MCPSetUpdated(Result);
-	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
-	Result->SetArrayField(TEXT("changes"), Changes);
-
-	if (Changes.Num() > 0)
-	{
-		// Self-inverse: call again with previous values as strings.
-		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-		Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
-		for (auto& Prev : PreviousValues->Values)
-		{
-			Payload->SetField(Prev.Key, Prev.Value);
-		}
-		MCPSetRollback(Result, TEXT("set_volume_properties"), Payload);
-	}
-
-	return MCPResult(Result);
-}
-
 TSharedPtr<FJsonValue> FLevelHandlers::GetWorldSettings(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
@@ -1667,16 +1406,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorMaterial(const TSharedPtr<FJsonOb
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* Actor = nullptr;
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		if (It->GetActorLabel() == ActorLabel)
-		{
-			Actor = *It;
-			break;
-		}
-	}
-
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
 	if (!Actor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
@@ -1725,67 +1455,6 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorMaterial(const TSharedPtr<FJsonOb
 
 	return MCPResult(Result);
 }
-
-// #94: ExponentialHeightFog tuning
-TSharedPtr<FJsonValue> FLevelHandlers::SetFogProperties(const TSharedPtr<FJsonObject>& Params)
-{
-	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
-	if (!World) return MCPError(TEXT("World not available"));
-
-	FString ActorLabel = OptionalString(Params, TEXT("actorLabel"));
-
-	AExponentialHeightFog* Fog = nullptr;
-	for (TActorIterator<AExponentialHeightFog> It(World); It; ++It)
-	{
-		if (ActorLabel.IsEmpty() || It->GetActorLabel() == ActorLabel)
-		{
-			Fog = *It;
-			break;
-		}
-	}
-	if (!Fog) return MCPError(TEXT("No ExponentialHeightFog actor found"));
-
-	UExponentialHeightFogComponent* FC = Fog->GetComponent();
-	if (!FC) return MCPError(TEXT("Fog component missing"));
-
-	double Density = 0.0;
-	if (Params->TryGetNumberField(TEXT("fogDensity"), Density))
-	{
-		FC->FogDensity = (float)Density;
-	}
-	double HeightFalloff = 0.0;
-	if (Params->TryGetNumberField(TEXT("fogHeightFalloff"), HeightFalloff))
-	{
-		FC->FogHeightFalloff = (float)HeightFalloff;
-	}
-	double StartDistance = 0.0;
-	if (Params->TryGetNumberField(TEXT("startDistance"), StartDistance))
-	{
-		FC->StartDistance = (float)StartDistance;
-	}
-	const TSharedPtr<FJsonObject>* ColorObj = nullptr;
-	if (Params->TryGetObjectField(TEXT("fogInscatteringColor"), ColorObj) ||
-	    Params->TryGetObjectField(TEXT("color"), ColorObj))
-	{
-		double R = 255, G = 255, B = 255;
-		(*ColorObj)->TryGetNumberField(TEXT("r"), R);
-		(*ColorObj)->TryGetNumberField(TEXT("g"), G);
-		(*ColorObj)->TryGetNumberField(TEXT("b"), B);
-		FC->FogInscatteringLuminance = FLinearColor(R / 255.0f, G / 255.0f, B / 255.0f);
-	}
-
-	FC->MarkRenderStateDirty();
-
-	auto Result = MCPSuccess();
-	MCPSetUpdated(Result);
-	Result->SetStringField(TEXT("actorLabel"), Fog->GetActorLabel());
-	Result->SetNumberField(TEXT("fogDensity"), FC->FogDensity);
-	Result->SetNumberField(TEXT("fogHeightFalloff"), FC->FogHeightFalloff);
-	return MCPResult(Result);
-}
-
-// #94: Bulk actor lookup helper
 TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByClass(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ClassName;
@@ -1801,7 +1470,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByClass(const TSharedPtr<FJsonOb
 		AActor* A = *It;
 		if (!A) continue;
 		FString CName = A->GetClass()->GetName();
-		if (CName == ClassName || A->GetClass()->IsChildOf(AActor::StaticClass()) && CName.Contains(ClassName))
+		if (CName == ClassName || (A->GetClass()->IsChildOf(AActor::StaticClass()) && CName.Contains(ClassName)))
 		{
 			TSharedPtr<FJsonObject> E = MakeShared<FJsonObject>();
 			E->SetStringField(TEXT("label"), A->GetActorLabel());
@@ -1961,11 +1630,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetWaterBodyProperty(const TSharedPtr<FJs
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* Actor = nullptr;
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		if (*It && (*It)->GetActorLabel() == ActorLabel) { Actor = *It; break; }
-	}
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
 	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
 
 	UClass* WBClass = LoadClass<UActorComponent>(nullptr, TEXT("/Script/Water.WaterBodyComponent"));
@@ -2016,16 +1681,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorBounds(const TSharedPtr<FJsonObje
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* Actor = nullptr;
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		if ((*It)->GetActorLabel() == ActorLabel)
-		{
-			Actor = *It;
-			break;
-		}
-	}
-
+	AActor* Actor = FindActorByLabel(World, ActorLabel);
 	if (!Actor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
@@ -2090,3 +1746,839 @@ TSharedPtr<FJsonValue> FLevelHandlers::ResolveActor(const TSharedPtr<FJsonObject
 	Result->SetObjectField(TEXT("location"), LocationObj);
 	return MCPResult(Result);
 }
+
+// #202/#230: generic per-instance UPROPERTY writer for level actors. Resolves
+// the actor by label, walks dotted property paths, and routes the value
+// through the recursive JSON setter so object refs / vectors / nested
+// structs all apply. The optional `force` flag flips off the EditDefaultsOnly
+// gate so per-instance overrides on EditDefaultsOnly properties go through
+// (the per-instance value always existed - the editor UI just hides it).
+TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonObject>& Params)
+{
+	FString ActorLabel;
+	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+
+	FString PropertyName;
+	if (auto Err = RequireString(Params, TEXT("propertyName"), PropertyName)) return Err;
+
+	const TSharedPtr<FJsonValue>* ValueField = Params->Values.Find(TEXT("value"));
+	if (!ValueField || !(*ValueField).IsValid())
+	{
+		return MCPError(TEXT("Missing 'value' parameter"));
+	}
+
+	const bool bForce = OptionalBool(Params, TEXT("force"), false);
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
+
+	UWorld* World = ResolveWorldScope(WorldScope);
+	if (!World)
+	{
+		return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
+	}
+
+	AActor* TargetActor = nullptr;
+	const bool bWorldSettings = ActorLabel.Equals(TEXT("WorldSettings"), ESearchCase::IgnoreCase);
+	if (bWorldSettings)
+	{
+		TargetActor = World->GetWorldSettings();
+	}
+	else
+	{
+		TargetActor = FindActorByLabel(World, ActorLabel);
+	}
+
+	if (!TargetActor)
+	{
+		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	}
+
+	TArray<FString> PathParts;
+	PropertyName.ParseIntoArray(PathParts, TEXT("."));
+	if (PathParts.Num() == 0) return MCPError(TEXT("Empty propertyName"));
+
+	UStruct* CurrentStruct = TargetActor->GetClass();
+	void* CurrentContainer = TargetActor;
+	FProperty* Prop = nullptr;
+	for (int32 i = 0; i < PathParts.Num(); ++i)
+	{
+		FProperty* Seg = CurrentStruct->FindPropertyByName(FName(*PathParts[i]));
+		if (!Seg) return MCPError(FString::Printf(TEXT("Property '%s' not found at '%s'"), *PathParts[i], *PropertyName));
+		if (i < PathParts.Num() - 1)
+		{
+			if (FStructProperty* SP = CastField<FStructProperty>(Seg))
+			{
+				CurrentContainer = SP->ContainerPtrToValuePtr<void>(CurrentContainer);
+				CurrentStruct = SP->Struct;
+			}
+			// #305: descend through Instanced UObject sub-objects too. The path
+			// "APCGWorldActor.LandscapeCacheObject.SerializationMode" hits an
+			// FObjectProperty (not a struct) - the previous "is not a struct"
+			// rejection forced execute_python on every instanced-subobject write.
+			else if (FObjectProperty* OP = CastField<FObjectProperty>(Seg))
+			{
+				UObject* SubObject = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(CurrentContainer));
+				if (!SubObject)
+				{
+					return MCPError(FString::Printf(
+						TEXT("Cannot descend into '%s' - the sub-object reference is null"),
+						*PathParts[i]));
+				}
+				SubObject->Modify();
+				CurrentContainer = SubObject;
+				CurrentStruct = SubObject->GetClass();
+			}
+			else
+			{
+				return MCPError(FString::Printf(
+					TEXT("'%s' is not a struct or sub-object - cannot descend"), *PathParts[i]));
+			}
+		}
+		else
+		{
+			Prop = Seg;
+		}
+	}
+
+	// Strip the EditDefaultsOnly gate locally for the duration of the write,
+	// then restore. Other UPROPERTY flags stay untouched.
+	const EPropertyFlags OriginalFlags = Prop->PropertyFlags;
+	if (bForce)
+	{
+		Prop->PropertyFlags &= ~CPF_DisableEditOnInstance;
+	}
+
+	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CurrentContainer);
+
+	FString PrevValue;
+	Prop->ExportText_Direct(PrevValue, ValuePtr, ValuePtr, TargetActor, PPF_None);
+
+	TargetActor->Modify();
+
+	// If the JSON value is a string and the property is an object reference,
+	// try resolving the string as an actor label first so callers can write
+	// {value: "Hopper_01"} for AHopper* references.
+	TSharedPtr<FJsonValue> Value = *ValueField;
+	if (Value->Type == EJson::String)
+	{
+		FString S = Value->AsString();
+		if (FObjectProperty* OP = CastField<FObjectProperty>(Prop))
+		{
+			AActor* RefActor = FindActorByLabel(World, S);
+			if (RefActor && RefActor->IsA(OP->PropertyClass))
+			{
+				OP->SetObjectPropertyValue(ValuePtr, RefActor);
+				goto WriteDone;
+			}
+		}
+	}
+
+	{
+		FString SetErr;
+		if (!MCPJsonProperty::SetJsonOnProperty(Prop, ValuePtr, Value, SetErr))
+		{
+			Prop->PropertyFlags = OriginalFlags;
+			return MCPError(FString::Printf(TEXT("Failed to set '%s': %s"), *PropertyName, *SetErr));
+		}
+	}
+
+WriteDone:
+	Prop->PropertyFlags = OriginalFlags;
+
+	FPropertyChangedEvent ChangeEvent(Prop);
+	TargetActor->PostEditChangeProperty(ChangeEvent);
+	TargetActor->MarkPackageDirty();
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("propertyName"), PropertyName);
+	Result->SetStringField(TEXT("previousValue"), PrevValue);
+
+	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Payload->SetStringField(TEXT("propertyName"), PropertyName);
+	Payload->SetStringField(TEXT("value"), PrevValue);
+	if (bForce) Payload->SetBoolField(TEXT("force"), true);
+	MCPSetRollback(Result, TEXT("set_actor_property"), Payload);
+
+	return MCPResult(Result);
+}
+
+namespace
+{
+}
+
+// #220: bulk delete actors matching label prefix / class / tag.
+TSharedPtr<FJsonValue> FLevelHandlers::DeleteActors(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+
+	const FString LabelPrefix = OptionalString(Params, TEXT("labelPrefix"));
+	const FString ClassName = OptionalString(Params, TEXT("className"));
+	const FString Tag = OptionalString(Params, TEXT("tag"));
+	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), false);
+
+	if (LabelPrefix.IsEmpty() && ClassName.IsEmpty() && Tag.IsEmpty())
+	{
+		return MCPError(TEXT("Provide at least one filter: labelPrefix, className, or tag"));
+	}
+
+	TArray<AActor*> Matches;
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* A = *It;
+		if (!A) continue;
+		if (!LabelPrefix.IsEmpty() && !A->GetActorLabel().StartsWith(LabelPrefix)) continue;
+		if (!ClassName.IsEmpty())
+		{
+			const FString CName = A->GetClass()->GetName();
+			if (!CName.Contains(ClassName)) continue;
+		}
+		if (!Tag.IsEmpty() && !A->ActorHasTag(FName(*Tag))) continue;
+		Matches.Add(A);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Labels;
+	for (AActor* A : Matches)
+	{
+		Labels.Add(MakeShared<FJsonValueString>(A->GetActorLabel()));
+	}
+
+	int32 Deleted = 0;
+	if (!bDryRun)
+	{
+		UEditorActorSubsystem* EAS = GEditor ? GEditor->GetEditorSubsystem<UEditorActorSubsystem>() : nullptr;
+		for (AActor* A : Matches)
+		{
+			bool bOk = false;
+			if (EAS)
+			{
+				bOk = EAS->DestroyActor(A);
+			}
+			if (!bOk && A)
+			{
+				bOk = World->DestroyActor(A);
+			}
+			if (bOk) Deleted++;
+		}
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetBoolField(TEXT("dryRun"), bDryRun);
+	Result->SetNumberField(TEXT("matched"), Matches.Num());
+	Result->SetNumberField(TEXT("deleted"), Deleted);
+	Result->SetArrayField(TEXT("labels"), Labels);
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FLevelHandlers::AddActorTag(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString ActorLabel; if (auto E = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return E;
+	FString Tag; if (auto E = RequireString(Params, TEXT("tag"), Tag)) return E;
+
+	AActor* A = FindActorByLabel(World, ActorLabel);
+	if (!A) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	const FName TagName(*Tag);
+	const bool bAlreadyHad = A->Tags.Contains(TagName);
+	if (!bAlreadyHad)
+	{
+		A->Modify();
+		A->Tags.Add(TagName);
+		A->MarkPackageDirty();
+	}
+	auto Result = MCPSuccess();
+	if (bAlreadyHad) MCPSetExisted(Result); else MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("tag"), Tag);
+	TArray<TSharedPtr<FJsonValue>> TagsOut;
+	for (const FName& T : A->Tags) TagsOut.Add(MakeShared<FJsonValueString>(T.ToString()));
+	Result->SetArrayField(TEXT("tags"), TagsOut);
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FLevelHandlers::RemoveActorTag(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString ActorLabel; if (auto E = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return E;
+	FString Tag; if (auto E = RequireString(Params, TEXT("tag"), Tag)) return E;
+
+	AActor* A = FindActorByLabel(World, ActorLabel);
+	if (!A) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	const FName TagName(*Tag);
+	const int32 Removed = A->Tags.Remove(TagName);
+	if (Removed > 0)
+	{
+		A->Modify();
+		A->MarkPackageDirty();
+	}
+
+	auto Result = MCPSuccess();
+	if (Removed == 0) MCPSetExisted(Result); else MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("tag"), Tag);
+	Result->SetNumberField(TEXT("removed"), Removed);
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FLevelHandlers::SetActorTags(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString ActorLabel; if (auto E = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return E;
+
+	AActor* A = FindActorByLabel(World, ActorLabel);
+	if (!A) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	const TArray<TSharedPtr<FJsonValue>>* TagsArr = nullptr;
+	if (!Params->TryGetArrayField(TEXT("tags"), TagsArr) || !TagsArr)
+	{
+		return MCPError(TEXT("Missing 'tags' array"));
+	}
+
+	A->Modify();
+	A->Tags.Reset();
+	for (const TSharedPtr<FJsonValue>& V : *TagsArr)
+	{
+		FString S;
+		if (V.IsValid() && V->TryGetString(S) && !S.IsEmpty())
+		{
+			A->Tags.AddUnique(FName(*S));
+		}
+	}
+	A->MarkPackageDirty();
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	TArray<TSharedPtr<FJsonValue>> Out;
+	for (const FName& T : A->Tags) Out.Add(MakeShared<FJsonValueString>(T.ToString()));
+	Result->SetArrayField(TEXT("tags"), Out);
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FLevelHandlers::ListActorTags(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString ActorLabel; if (auto E = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return E;
+
+	AActor* A = FindActorByLabel(World, ActorLabel);
+	if (!A) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	TArray<TSharedPtr<FJsonValue>> Out;
+	for (const FName& T : A->Tags) Out.Add(MakeShared<FJsonValueString>(T.ToString()));
+	Result->SetArrayField(TEXT("tags"), Out);
+	Result->SetNumberField(TEXT("count"), Out.Num());
+	return MCPResult(Result);
+}
+
+// #205: attach an actor's root component to a parent actor.
+TSharedPtr<FJsonValue> FLevelHandlers::AttachActor(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString ChildLabel; if (auto E = RequireString(Params, TEXT("childLabel"), ChildLabel)) return E;
+	FString ParentLabel; if (auto E = RequireString(Params, TEXT("parentLabel"), ParentLabel)) return E;
+
+	AActor* Child = FindActorByLabel(World, ChildLabel);
+	AActor* Parent = FindActorByLabel(World, ParentLabel);
+	if (!Child) return MCPError(FString::Printf(TEXT("Child actor not found: %s"), *ChildLabel));
+	if (!Parent) return MCPError(FString::Printf(TEXT("Parent actor not found: %s"), *ParentLabel));
+
+	const FString RuleStr = OptionalString(Params, TEXT("attachRule"), TEXT("KeepWorld")).ToLower();
+	EAttachmentRule Loc = EAttachmentRule::KeepWorld;
+	if (RuleStr.Contains(TEXT("relative"))) Loc = EAttachmentRule::KeepRelative;
+	else if (RuleStr.Contains(TEXT("snap"))) Loc = EAttachmentRule::SnapToTarget;
+
+	const FString SocketName = OptionalString(Params, TEXT("socketName"));
+
+	Child->Modify();
+	const bool bOk = Child->AttachToActor(Parent, FAttachmentTransformRules(Loc, Loc, Loc, true), FName(*SocketName));
+	Child->MarkPackageDirty();
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("childLabel"), ChildLabel);
+	Result->SetStringField(TEXT("parentLabel"), ParentLabel);
+	Result->SetBoolField(TEXT("attached"), bOk);
+
+	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("childLabel"), ChildLabel);
+	MCPSetRollback(Result, TEXT("detach_actor"), Payload);
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FLevelHandlers::DetachActor(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString ChildLabel; if (auto E = RequireString(Params, TEXT("childLabel"), ChildLabel)) return E;
+
+	AActor* Child = FindActorByLabel(World, ChildLabel);
+	if (!Child) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ChildLabel));
+
+	Child->Modify();
+	Child->DetachFromActor(FDetachmentTransformRules(EDetachmentRule::KeepWorld, true));
+	Child->MarkPackageDirty();
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("childLabel"), ChildLabel);
+	Result->SetBoolField(TEXT("detached"), true);
+	return MCPResult(Result);
+}
+
+// #205: set USceneComponent::Mobility on the actor's root component.
+TSharedPtr<FJsonValue> FLevelHandlers::SetActorMobility(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString ActorLabel; if (auto E = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return E;
+	FString MobilityStr; if (auto E = RequireString(Params, TEXT("mobility"), MobilityStr)) return E;
+
+	AActor* A = FindActorByLabel(World, ActorLabel);
+	if (!A) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	USceneComponent* Root = A->GetRootComponent();
+	if (!Root) return MCPError(FString::Printf(TEXT("Actor '%s' has no root component"), *ActorLabel));
+
+	const FString L = MobilityStr.ToLower();
+	EComponentMobility::Type M = EComponentMobility::Static;
+	if (L == TEXT("movable") || L == TEXT("moveable")) M = EComponentMobility::Movable;
+	else if (L == TEXT("stationary")) M = EComponentMobility::Stationary;
+	else if (L == TEXT("static")) M = EComponentMobility::Static;
+	else return MCPError(FString::Printf(TEXT("Unknown mobility '%s' (expected static|stationary|movable)"), *MobilityStr));
+
+	const EComponentMobility::Type Prev = Root->Mobility;
+	Root->Modify();
+	Root->SetMobility(M);
+	A->MarkPackageDirty();
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("mobility"), MobilityStr);
+
+	const TCHAR* PrevStr = Prev == EComponentMobility::Movable ? TEXT("movable")
+		: Prev == EComponentMobility::Stationary ? TEXT("stationary") : TEXT("static");
+	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Payload->SetStringField(TEXT("mobility"), PrevStr);
+	MCPSetRollback(Result, TEXT("set_actor_mobility"), Payload);
+	return MCPResult(Result);
+}
+
+// #204: read the current edit-target sub-level. UE drops new actors into this
+// level when multiple sub-levels are loaded; without a way to query/set it the
+// caller can't reliably target a particular streaming sub-level for spawns.
+TSharedPtr<FJsonValue> FLevelHandlers::GetCurrentEditLevel(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	ULevel* Cur = World->GetCurrentLevel();
+	auto Result = MCPSuccess();
+	if (Cur)
+	{
+		Result->SetStringField(TEXT("levelName"), Cur->GetOuter()->GetName());
+		Result->SetStringField(TEXT("levelPath"), Cur->GetOuter()->GetPathName());
+		Result->SetBoolField(TEXT("isPersistent"), Cur == World->PersistentLevel);
+	}
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FLevelHandlers::SetCurrentEditLevel(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString LevelName;
+	if (!Params->TryGetStringField(TEXT("levelName"), LevelName))
+	{
+		Params->TryGetStringField(TEXT("levelPath"), LevelName);
+	}
+	if (LevelName.IsEmpty()) return MCPError(TEXT("Missing levelName (or levelPath)"));
+
+	ULevelEditorSubsystem* LES = GEditor ? GEditor->GetEditorSubsystem<ULevelEditorSubsystem>() : nullptr;
+	if (!LES) return MCPError(TEXT("LevelEditorSubsystem not available"));
+
+	const bool bOk = LES->SetCurrentLevelByName(FName(*LevelName));
+	if (!bOk)
+	{
+		return MCPError(FString::Printf(TEXT("No loaded sub-level named '%s'"), *LevelName));
+	}
+
+	ULevel* Cur = World->GetCurrentLevel();
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	if (Cur)
+	{
+		Result->SetStringField(TEXT("levelName"), Cur->GetOuter()->GetName());
+		Result->SetStringField(TEXT("levelPath"), Cur->GetOuter()->GetPathName());
+	}
+	return MCPResult(Result);
+}
+
+// #206: streaming sub-level CRUD
+namespace
+{
+	static ULevelStreaming* FindStreamingByName(UWorld* World, const FString& NameOrPath)
+	{
+		if (!World) return nullptr;
+		for (ULevelStreaming* SL : World->GetStreamingLevels())
+		{
+			if (!SL) continue;
+			const FString PkgName = SL->GetWorldAssetPackageName();
+			if (PkgName == NameOrPath) return SL;
+			if (FPaths::GetBaseFilename(PkgName) == NameOrPath) return SL;
+			if (SL->GetName() == NameOrPath) return SL;
+		}
+		return nullptr;
+	}
+}
+
+TSharedPtr<FJsonValue> FLevelHandlers::ListStreamingSublevels(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+
+	TArray<TSharedPtr<FJsonValue>> Out;
+	for (ULevelStreaming* SL : World->GetStreamingLevels())
+	{
+		if (!SL) continue;
+		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+		const FString PkgName = SL->GetWorldAssetPackageName();
+		O->SetStringField(TEXT("levelName"), FPaths::GetBaseFilename(PkgName));
+		O->SetStringField(TEXT("packageName"), PkgName);
+		O->SetStringField(TEXT("streamingClass"), SL->GetClass()->GetName());
+		O->SetBoolField(TEXT("initiallyLoaded"), SL->ShouldBeLoaded());
+		O->SetBoolField(TEXT("initiallyVisible"), SL->GetShouldBeVisibleFlag());
+		O->SetBoolField(TEXT("loaded"), SL->IsLevelLoaded());
+		O->SetBoolField(TEXT("visible"), SL->GetShouldBeVisibleFlag());
+		const FTransform T = SL->LevelTransform;
+		TSharedPtr<FJsonObject> Loc = MakeShared<FJsonObject>();
+		Loc->SetNumberField(TEXT("x"), T.GetLocation().X);
+		Loc->SetNumberField(TEXT("y"), T.GetLocation().Y);
+		Loc->SetNumberField(TEXT("z"), T.GetLocation().Z);
+		O->SetObjectField(TEXT("location"), Loc);
+		Out.Add(MakeShared<FJsonValueObject>(O));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetArrayField(TEXT("sublevels"), Out);
+	Result->SetNumberField(TEXT("count"), Out.Num());
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FLevelHandlers::AddStreamingSublevel(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString LevelPath; if (auto E = RequireString(Params, TEXT("levelPath"), LevelPath)) return E;
+
+	const FString StreamingClassName = OptionalString(Params, TEXT("streamingClass"), TEXT("LevelStreamingDynamic"));
+	UClass* StreamingClass = ULevelStreamingDynamic::StaticClass();
+	if (StreamingClassName.Equals(TEXT("LevelStreamingAlwaysLoaded"), ESearchCase::IgnoreCase))
+	{
+		StreamingClass = LoadClass<ULevelStreaming>(nullptr, TEXT("/Script/Engine.LevelStreamingAlwaysLoaded"));
+		if (!StreamingClass) StreamingClass = ULevelStreamingDynamic::StaticClass();
+	}
+
+	ULevelStreaming* SL = UEditorLevelUtils::AddLevelToWorld(World, *LevelPath, StreamingClass);
+	if (!SL)
+	{
+		return MCPError(FString::Printf(TEXT("Failed to add sub-level '%s'"), *LevelPath));
+	}
+
+	if (Params->HasField(TEXT("initiallyLoaded"))) SL->SetShouldBeLoaded(OptionalBool(Params, TEXT("initiallyLoaded"), true));
+	if (Params->HasField(TEXT("initiallyVisible"))) SL->SetShouldBeVisible(OptionalBool(Params, TEXT("initiallyVisible"), true));
+
+	if (Params->HasField(TEXT("location")))
+	{
+		FTransform T = SL->LevelTransform;
+		T.SetLocation(OptionalVec3(Params, TEXT("location")));
+		SL->LevelTransform = T;
+	}
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("levelPath"), LevelPath);
+	Result->SetStringField(TEXT("levelName"), FPaths::GetBaseFilename(LevelPath));
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FLevelHandlers::RemoveStreamingSublevel(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString Name;
+	if (!Params->TryGetStringField(TEXT("levelName"), Name)) Params->TryGetStringField(TEXT("levelPath"), Name);
+	if (Name.IsEmpty()) return MCPError(TEXT("Missing levelName (or levelPath)"));
+
+	ULevelStreaming* SL = FindStreamingByName(World, Name);
+	if (!SL) return MCPError(FString::Printf(TEXT("Streaming sub-level not found: %s"), *Name));
+
+	ULevel* Loaded = SL->GetLoadedLevel();
+	if (Loaded)
+	{
+		UEditorLevelUtils::RemoveLevelFromWorld(Loaded);
+	}
+	World->RemoveStreamingLevels({ SL });
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("levelName"), Name);
+	Result->SetBoolField(TEXT("removed"), true);
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FLevelHandlers::SetStreamingSublevelProperties(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+	FString Name;
+	if (!Params->TryGetStringField(TEXT("levelName"), Name)) Params->TryGetStringField(TEXT("levelPath"), Name);
+	if (Name.IsEmpty()) return MCPError(TEXT("Missing levelName (or levelPath)"));
+
+	ULevelStreaming* SL = FindStreamingByName(World, Name);
+	if (!SL) return MCPError(FString::Printf(TEXT("Streaming sub-level not found: %s"), *Name));
+
+	bool bChanged = false;
+	if (Params->HasField(TEXT("initiallyLoaded"))) { SL->SetShouldBeLoaded(OptionalBool(Params, TEXT("initiallyLoaded"), true)); bChanged = true; }
+	if (Params->HasField(TEXT("initiallyVisible"))) { SL->SetShouldBeVisible(OptionalBool(Params, TEXT("initiallyVisible"), true)); bChanged = true; }
+
+	const TSharedPtr<FJsonObject>* LocObj = nullptr;
+	if (Params->TryGetObjectField(TEXT("location"), LocObj) && LocObj && (*LocObj).IsValid())
+	{
+		double X = 0, Y = 0, Z = 0;
+		(*LocObj)->TryGetNumberField(TEXT("x"), X);
+		(*LocObj)->TryGetNumberField(TEXT("y"), Y);
+		(*LocObj)->TryGetNumberField(TEXT("z"), Z);
+		FTransform T = SL->LevelTransform;
+		T.SetLocation(FVector(X, Y, Z));
+		SL->LevelTransform = T;
+		bChanged = true;
+	}
+
+	bool bEditorVisibleSet = false;
+	const bool bEditorVisible = OptionalBool(Params, TEXT("editorVisible"), true);
+	if (Params->HasField(TEXT("editorVisible")))
+	{
+		ULevel* Loaded = SL->GetLoadedLevel();
+		if (Loaded)
+		{
+			UEditorLevelUtils::SetLevelVisibility(Loaded, bEditorVisible, false);
+		}
+		bEditorVisibleSet = true;
+	}
+
+	auto Result = MCPSuccess();
+	if (bChanged) MCPSetUpdated(Result); else MCPSetExisted(Result);
+	Result->SetStringField(TEXT("levelName"), Name);
+	Result->SetBoolField(TEXT("initiallyLoaded"), SL->ShouldBeLoaded());
+	Result->SetBoolField(TEXT("initiallyVisible"), SL->GetShouldBeVisibleFlag());
+	if (bEditorVisibleSet) Result->SetBoolField(TEXT("editorVisible"), bEditorVisible);
+	return MCPResult(Result);
+}
+
+// #203: batch spawn StaticMeshActors on a 3D grid (or jittered cloud) so
+// agents don't ship one place_actor per mesh. Bounds are an FBox; density
+// drives count along each axis.
+TSharedPtr<FJsonValue> FLevelHandlers::SpawnGrid(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+
+	FString MeshPath; if (auto E = RequireString(Params, TEXT("staticMesh"), MeshPath)) return E;
+	UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, *MeshPath);
+	if (!Mesh) return MCPError(FString::Printf(TEXT("StaticMesh not found: %s"), *MeshPath));
+
+	FVector Min, Max;
+	if (auto Err = RequireVec3(Params, TEXT("min"), Min)) return Err;
+	if (auto Err = RequireVec3(Params, TEXT("max"), Max)) return Err;
+
+	const int32 CountX = FMath::Max(1, OptionalInt(Params, TEXT("countX"), 4));
+	const int32 CountY = FMath::Max(1, OptionalInt(Params, TEXT("countY"), 4));
+	const int32 CountZ = FMath::Max(1, OptionalInt(Params, TEXT("countZ"), 1));
+	const double Jitter = OptionalNumber(Params, TEXT("jitter"), 0.0);
+	const FString LabelPrefix = OptionalString(Params, TEXT("labelPrefix"), TEXT("Grid"));
+
+	const FVector Step = FVector(
+		CountX > 1 ? (Max.X - Min.X) / (CountX - 1) : 0,
+		CountY > 1 ? (Max.Y - Min.Y) / (CountY - 1) : 0,
+		CountZ > 1 ? (Max.Z - Min.Z) / (CountZ - 1) : 0);
+
+	FRandomStream Rand((int32)FDateTime::Now().GetTicks());
+
+	TArray<TSharedPtr<FJsonValue>> Spawned;
+	int32 Index = 0;
+	for (int32 zi = 0; zi < CountZ; ++zi)
+	for (int32 yi = 0; yi < CountY; ++yi)
+	for (int32 xi = 0; xi < CountX; ++xi)
+	{
+		FVector Loc = Min + FVector(xi * Step.X, yi * Step.Y, zi * Step.Z);
+		if (Jitter > 0.0)
+		{
+			Loc += FVector(Rand.FRandRange(-Jitter, Jitter), Rand.FRandRange(-Jitter, Jitter), Rand.FRandRange(-Jitter, Jitter));
+		}
+		FActorSpawnParameters SpawnParams;
+		AStaticMeshActor* SMA = World->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), Loc, FRotator::ZeroRotator, SpawnParams);
+		if (!SMA) continue;
+		SMA->SetMobility(EComponentMobility::Movable);
+		if (UStaticMeshComponent* SMC = SMA->GetStaticMeshComponent())
+		{
+			SMC->SetStaticMesh(Mesh);
+		}
+		SMA->SetActorLabel(FString::Printf(TEXT("%s_%d"), *LabelPrefix, Index));
+		Spawned.Add(MakeShared<FJsonValueString>(SMA->GetActorLabel()));
+		Index++;
+	}
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetNumberField(TEXT("count"), Spawned.Num());
+	Result->SetArrayField(TEXT("labels"), Spawned);
+	return MCPResult(Result);
+}
+
+// #203: batch translate by label list or tag.
+TSharedPtr<FJsonValue> FLevelHandlers::BatchTranslate(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+
+	FVector Offset;
+	if (auto Err = RequireVec3(Params, TEXT("offset"), Offset)) return Err;
+
+	TSet<AActor*> Targets;
+	const TArray<TSharedPtr<FJsonValue>>* LabelArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("actorLabels"), LabelArr) && LabelArr)
+	{
+		for (const auto& V : *LabelArr)
+		{
+			FString S; if (V.IsValid() && V->TryGetString(S))
+			{
+				if (AActor* A = FindActorByLabel(World, S)) Targets.Add(A);
+			}
+		}
+	}
+	FString TagFilter; if (Params->TryGetStringField(TEXT("tag"), TagFilter) && !TagFilter.IsEmpty())
+	{
+		const FName TagName(*TagFilter);
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			if (It->ActorHasTag(TagName)) Targets.Add(*It);
+		}
+	}
+	if (Targets.Num() == 0) return MCPError(TEXT("Provide actorLabels[] or tag matching at least one actor"));
+
+	for (AActor* A : Targets)
+	{
+		A->Modify();
+		A->SetActorLocation(A->GetActorLocation() + Offset);
+		A->MarkPackageDirty();
+	}
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetNumberField(TEXT("count"), Targets.Num());
+	return MCPResult(Result);
+}
+
+// #264 — place_actors_batch: spawn many StaticMeshActors with per-instance
+// mesh + transform. Avoids the chatty place_actor-per-row pattern that filled
+// up the workaround log for procedural placement scripts.
+TSharedPtr<FJsonValue> FLevelHandlers::PlaceActorsBatch(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+
+	const TArray<TSharedPtr<FJsonValue>>* ActorsArr = nullptr;
+	if (!Params->TryGetArrayField(TEXT("actors"), ActorsArr) || !ActorsArr)
+	{
+		return MCPError(TEXT("Missing 'actors' (array of {staticMesh, location?, rotation?, scale?, label?})"));
+	}
+
+	auto ReadVec = [](const TSharedPtr<FJsonObject>& Obj, FVector Default) -> FVector
+	{
+		if (!Obj.IsValid()) return Default;
+		FVector V = Default;
+		double X = 0; if (Obj->TryGetNumberField(TEXT("x"), X)) V.X = X;
+		double Y = 0; if (Obj->TryGetNumberField(TEXT("y"), Y)) V.Y = Y;
+		double Z = 0; if (Obj->TryGetNumberField(TEXT("z"), Z)) V.Z = Z;
+		return V;
+	};
+	auto ReadRot = [](const TSharedPtr<FJsonObject>& Obj) -> FRotator
+	{
+		if (!Obj.IsValid()) return FRotator::ZeroRotator;
+		FRotator R(0, 0, 0);
+		double V = 0; if (Obj->TryGetNumberField(TEXT("pitch"), V)) R.Pitch = V;
+		if (Obj->TryGetNumberField(TEXT("yaw"), V)) R.Yaw = V;
+		if (Obj->TryGetNumberField(TEXT("roll"), V)) R.Roll = V;
+		return R;
+	};
+
+	// Cache mesh loads by path so a 1000-row batch with 5 unique meshes only
+	// does 5 LoadObject calls.
+	TMap<FString, UStaticMesh*> MeshCache;
+	auto ResolveMesh = [&MeshCache](const FString& Path) -> UStaticMesh*
+	{
+		if (Path.IsEmpty()) return nullptr;
+		if (UStaticMesh** Cached = MeshCache.Find(Path)) return *Cached;
+		UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, *Path);
+		MeshCache.Add(Path, Mesh);
+		return Mesh;
+	};
+
+	int32 Spawned = 0, FailedMesh = 0, FailedSpawn = 0;
+	TArray<TSharedPtr<FJsonValue>> Labels;
+	TArray<TSharedPtr<FJsonValue>> Errors;
+
+	for (int32 i = 0; i < ActorsArr->Num(); i++)
+	{
+		const TSharedPtr<FJsonValue>& Entry = (*ActorsArr)[i];
+		const TSharedPtr<FJsonObject> Row = Entry.IsValid() ? Entry->AsObject() : nullptr;
+		if (!Row.IsValid()) { FailedSpawn++; continue; }
+
+		FString MeshPath;
+		Row->TryGetStringField(TEXT("staticMesh"), MeshPath);
+		UStaticMesh* Mesh = ResolveMesh(MeshPath);
+		if (!Mesh)
+		{
+			FailedMesh++;
+			TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
+			Err->SetNumberField(TEXT("index"), i);
+			Err->SetStringField(TEXT("staticMesh"), MeshPath);
+			Err->SetStringField(TEXT("reason"), TEXT("static_mesh_not_found"));
+			Errors.Add(MakeShared<FJsonValueObject>(Err));
+			continue;
+		}
+
+		const TSharedPtr<FJsonObject>* LocObj = nullptr;
+		const TSharedPtr<FJsonObject>* RotObj = nullptr;
+		const TSharedPtr<FJsonObject>* ScaleObj = nullptr;
+		Row->TryGetObjectField(TEXT("location"), LocObj);
+		Row->TryGetObjectField(TEXT("rotation"), RotObj);
+		Row->TryGetObjectField(TEXT("scale"), ScaleObj);
+
+		const FVector Loc   = LocObj ? ReadVec(*LocObj, FVector::ZeroVector) : FVector::ZeroVector;
+		const FRotator Rot  = RotObj ? ReadRot(*RotObj) : FRotator::ZeroRotator;
+		const FVector Scale = ScaleObj ? ReadVec(*ScaleObj, FVector::OneVector) : FVector::OneVector;
+
+		FActorSpawnParameters SpawnParams;
+		AStaticMeshActor* SMA = World->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), Loc, Rot, SpawnParams);
+		if (!SMA) { FailedSpawn++; continue; }
+		SMA->SetMobility(EComponentMobility::Movable);
+		if (UStaticMeshComponent* SMC = SMA->GetStaticMeshComponent())
+		{
+			SMC->SetStaticMesh(Mesh);
+			SMC->SetWorldScale3D(Scale);
+		}
+
+		FString Label;
+		if (Row->TryGetStringField(TEXT("label"), Label) && !Label.IsEmpty())
+		{
+			SMA->SetActorLabel(Label);
+		}
+		Labels.Add(MakeShared<FJsonValueString>(SMA->GetActorLabel()));
+		Spawned++;
+	}
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetNumberField(TEXT("requested"), ActorsArr->Num());
+	Result->SetNumberField(TEXT("spawned"), Spawned);
+	Result->SetNumberField(TEXT("failedMesh"), FailedMesh);
+	Result->SetNumberField(TEXT("failedSpawn"), FailedSpawn);
+	Result->SetArrayField(TEXT("labels"), Labels);
+	if (Errors.Num() > 0) Result->SetArrayField(TEXT("errors"), Errors);
+	return MCPResult(Result);
+}
+
