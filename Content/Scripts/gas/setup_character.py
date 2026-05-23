@@ -40,24 +40,16 @@ def init_gas_for_actor(actor: ue.Actor):
 
     # 1) 查找 ASC（优先用蓝图已有组件）
     asc = None
-    # 尝试多种方式获取
     asc_class = ue.AbilitySystemComponent.Class()
     if asc_class:
         try:
             asc = actor.GetComponentByClass(asc_class)
         except Exception:
             pass
-    if not asc:
-        asc = actor.GetComponentByClass(ue.AbilitySystemComponent)
-    if not asc and hasattr(actor, 'AbilitySystem'):
-        asc = actor.AbilitySystem
-        if asc:
-            print("[GAS] ASC 通过属性名获取")
+
     if not asc:
         print("[GAS] 未能获取 ASC，请确保蓝图中有 AbilitySystemComponent 组件")
         return
-
-    print(f"[GAS] ASC: {asc}")
 
     # 2) 注册 AttributeSet
     attr_set_class = AttrSet_Base.Class()
@@ -65,15 +57,8 @@ def init_gas_for_actor(actor: ue.Actor):
     if not attr_set:
         asc.InitStats(attr_set_class, None)
         attr_set = asc.GetAttributeSet(attr_set_class)
-        print("[GAS] AttributeSet 已通过 InitStats 注册")
-    else:
-        print("[GAS] AttributeSet 已存在")
 
-    if attr_set:
-        print(f"[GAS] Health={attr_set.Health}, MaxHealth={attr_set.MaxHealth}, "
-              f"AttackPower={attr_set.AttackPower}, MoveSpeed={attr_set.MoveSpeed}")
-    else:
+    if not attr_set:
         print("[GAS] 警告: 获取不到 AttributeSet")
 
-    print("[GAS] 角色骨架初始化完成")
     return asc

@@ -24,6 +24,10 @@ def on_init():
         import gas.setup_character
     except Exception:
         traceback.print_exc()
+    try:
+        import gas.abilities.ga_fireball
+    except Exception:
+        traceback.print_exc()
 
 
 def on_shutdown():

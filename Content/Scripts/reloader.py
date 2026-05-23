@@ -176,7 +176,6 @@ class ReloadFinder(object):
 		if old_module:
 			sys.modules[module_name] = old_module
 
-		# 用 importlib 替代已废弃的 imp 模块
 		spec = None
 		if parent_path:
 			for search_path in parent_path:
@@ -184,8 +183,22 @@ class ReloadFinder(object):
 				if os.path.exists(candidate):
 					spec = importlib.util.spec_from_file_location(module_name, candidate)
 					break
+			if spec is None:
+				for search_path in parent_path:
+					candidate = os.path.join(search_path, short_name, '__init__.py')
+					if os.path.exists(candidate):
+						spec = importlib.util.spec_from_file_location(module_name, candidate)
+						break
 		if spec is None:
-			spec = importlib.util.find_spec(short_name)
+			for sp in sys.path:
+				candidate = os.path.join(sp, short_name + '.py')
+				if os.path.exists(candidate):
+					spec = importlib.util.spec_from_file_location(module_name, candidate)
+					break
+				candidate = os.path.join(sp, short_name, '__init__.py')
+				if os.path.exists(candidate):
+					spec = importlib.util.spec_from_file_location(module_name, candidate)
+					break
 		if spec is None:
 			raise ModuleNotFoundError("No module named '%s'" % module_name)
 		new_module = importlib.util.module_from_spec(spec)
@@ -201,18 +214,19 @@ class ReloadFinder(object):
 			if isinstance(new_attr, type):
 				if old_attr and isinstance(old_attr, type):
 					if not self._update_class(old_attr, new_attr):
-						old_module_dict[attr_name] = new_attr
+						setattr(new_module, attr_name, old_attr)
 			elif inspect.isfunction(new_attr):
 				if old_attr and inspect.isfunction(old_attr):
 					if not self._update_func(old_attr, new_attr):
-						old_module_dict[attr_name] = new_attr
+						setattr(new_module, attr_name, old_attr)
 
 		new_module.__dict__.update(old_module_dict)
 		return new_module
 
 	# 使用新方法的func_code去替换旧方法的func_code
 	# 返回是否替换成功
-	def _update_func(self, old_func, new_func, update_depth=5):
+	@staticmethod
+	def _update_func(old_func, new_func, update_depth=5):
 		# type: (types.FunctionType, types.FunctionType, int) -> bool
 		if inspect.isbuiltin(old_func) or inspect.isbuiltin(new_func):
 			return False
@@ -231,7 +245,7 @@ class ReloadFinder(object):
 
 		defaults = ()
 		if new_func.__defaults__:
-			defaults = tuple([self._update_object(obj) for obj in new_func.__defaults__])
+			defaults = tuple([ReloadFinder._update_object(obj) for obj in new_func.__defaults__])
 		old_func.__defaults__ = defaults
 
 		if old_cell_num > 0 and update_depth > 0:
@@ -239,13 +253,14 @@ class ReloadFinder(object):
 				old_cell = old_func.__closure__[index]
 				new_cell = new_func.__closure__[index]
 				if inspect.isfunction(old_cell.cell_contents) and inspect.isfunction(new_cell.cell_contents):
-					self._update_func(old_cell.cell_contents, new_cell.cell_contents, update_depth - 1)
+					ReloadFinder._update_func(old_cell.cell_contents, new_cell.cell_contents, update_depth - 1)
 
 		return True
 
 	# 使用新类中方法的func_code去替换旧类中方法的func_code
 	# 返回是否替换成功
-	def _update_class(self, old_class, new_class):
+	@staticmethod
+	def _update_class(old_class, new_class):
 		# type: (type, type) -> bool
 		if (old_class is type) or (new_class is type):
 			return False
@@ -272,18 +287,19 @@ class ReloadFinder(object):
 
 			old_attr = old_class.__dict__[attr_name]
 			if inspect.isfunction(old_attr) and inspect.isfunction(new_attr):
-				if not self._update_func(old_attr, new_attr):
+				if not ReloadFinder._update_func(old_attr, new_attr):
 					setattr(old_class, attr_name, new_attr)
 			elif isinstance(new_attr, staticmethod) or isinstance(new_attr, classmethod):
 				if hasattr(old_attr, '__func__') and hasattr(new_attr, '__func__') \
-					and not self._update_func(old_attr.__func__, new_attr.__func__):
+					and not ReloadFinder._update_func(old_attr.__func__, new_attr.__func__):
 					old_attr.__func__ = new_attr.__func__
 			elif inspect.isclass(old_attr) and inspect.isclass(new_attr) and new_attr.__name__ is old_attr.__name__:
-				self._update_class(old_attr, new_attr)
+				ReloadFinder._update_class(old_attr, new_attr)
 
 		return True
 
-	def _update_object(self, default_val):
+	@staticmethod
+	def _update_object(default_val):
 		new_class = getattr(default_val, '__class__', None) # type: type|None
 		if new_class is None:
 			return default_val

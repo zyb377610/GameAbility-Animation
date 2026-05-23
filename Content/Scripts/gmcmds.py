@@ -90,3 +90,59 @@ def timertest():
     timer_mgr = ue.GetEditorTimerManager()
     timer_mgr.SetTimer(_on_timer, 1, False,)
     print('timer begin.')
+
+
+# ==================== Step 1.2: 火球技能测试命令 ====================
+
+def fireball():
+    """测试火球技能：赋予 GA_Fireball 给当前控制的 Pawn 并激活"""
+    import ue
+    from gas.setup_character import init_gas_for_actor
+    from gas.abilities.ga_fireball import GA_Fireball
+
+    w = ue.GetGameWorld()
+    if not w:
+        print("[fireball] 错误: 当前没有 World，请先 PIE")
+        return
+
+    ctrl = ue.GameplayStatics.GetPlayerController(w, 0)
+    if not ctrl or not ctrl.Pawn:
+        print("[fireball] 错误: 获取不到 Pawn")
+        return
+
+    pawn = ctrl.Pawn
+    asc = init_gas_for_actor(pawn)
+    if not asc:
+        return
+
+    ga_class = GA_Fireball.Class()
+    if not ga_class:
+        print("[fireball] 错误: GA_Fireball UClass 未找到")
+        return
+
+    asc.GiveAbility(ga_class, 1)
+    asc.TryActivateAbilityByClass(ga_class)
+
+    # NePy 不支持 K2_ActivateAbility 重载，手动调用
+    for spec in asc.ActivatableAbilities.Items:
+        if spec.Ability and hasattr(spec.Ability, 'do_fireball'):
+            spec.Ability.do_fireball(asc, pawn)
+            break
+
+
+def gas_init():
+    """初始化当前控制 Pawn 的 GAS 骨架"""
+    import ue
+    from gas.setup_character import init_gas_for_actor
+
+    w = ue.GetGameWorld()
+    if not w:
+        print("[gas_init] 错误: 当前没有 World，请先 PIE")
+        return
+
+    ctrl = ue.GameplayStatics.GetPlayerController(w, 0)
+    if not ctrl or not ctrl.Pawn:
+        print("[gas_init] 错误: 获取不到 Pawn")
+        return
+
+    init_gas_for_actor(ctrl.Pawn)

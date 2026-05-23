@@ -183,4 +183,6 @@ class BP_Projectile(ue.Actor):
 
 ## 九、状态
 
-🔲 待开始
+✅ 已完成
+
+> 详见同目录 `step1.2_实践总结.md`
