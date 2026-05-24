@@ -203,3 +203,33 @@ def gas_init():
     except Exception:
         import traceback
         traceback.print_exc()
+
+
+# ==================== Step 2.1: BlendSpace 移动测试 ====================
+
+def locomotion():
+    """
+    对当前控制角色启动/停止 LocomotionUpdater。
+    第一次调用注册，第二次调用移除（toggle）。
+    """
+    import ue
+    from animation.locomotion import register_locomotion_for_character, \
+        unregister_locomotion_for_character, _registry
+
+    w = ue.GetGameWorld()
+    if not w:
+        print("[locomotion] 错误: 当前没有 World，请先 PIE")
+        return
+
+    ctrl = ue.GameplayStatics.GetPlayerController(w, 0)
+    if not ctrl or not ctrl.Pawn:
+        print("[locomotion] 错误: 获取不到 Pawn")
+        return
+
+    pawn = ctrl.Pawn
+    if id(pawn) in _registry:
+        unregister_locomotion_for_character(pawn)
+        print("[locomotion] LocomotionUpdater 已停止")
+    else:
+        register_locomotion_for_character(pawn)
+        print("[locomotion] LocomotionUpdater 已启动，移动角色观察 BlendSpace 效果")

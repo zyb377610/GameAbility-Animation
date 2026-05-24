@@ -20,7 +20,7 @@
 ## 三、前置条件
 
 - ✅ Step 1.1 完成：角色可操控移动
-- 🔲 需准备 **BlendSpace 1D** 资产（`Content/Characters/BS_Locomotion`），横轴为 Speed（0 ~ 600），样本点包含 Idle(0)、Walk(200)、Jog(400)、Sprint(600)
+- 🔲 需准备 **BlendSpace 1D** 资产（`Content/Characters/BS_Locomotion`），横轴为 Speed（0 ~ 400），样本点包含 Idle(0)、Walk(200)、Jog(400)。Sprint 可选后续追加
 - 🔲 需在 AnimBP 中已建好 `Speed` 变量（float），驱动 BlendSpace
 
 ---
@@ -96,12 +96,12 @@ def _compute_direction(velocity: ue.Vector, forward: ue.Vector) -> float:
 ### 5.3 BlendSpace 配置
 
 BlendSpace 1D 需要在编辑器中手动配置：
-- **横轴名称**：`Speed`，范围 0-600，网格 3
+- **横轴名称**：`Speed`，范围 0-400，网格 3
 - **采样点**：
   - Idle（Speed=0）
   - Walk（Speed=200）
   - Jog（Speed=400）
-  - Sprint（Speed=600）
+  - Sprint（Speed=600，可选，暂缺素材可省略）
 - 插值方式：`TargetWeightInterpolationSpeedPerSec` 可设 > 0 以获得平滑过渡
 
 ### 5.4 AnimBP 连线
@@ -141,14 +141,14 @@ AnimBP 每帧自动从 `Speed` 变量读取值驱动 BlendSpace。Python 只需�
 
 ## 八、验证标准
 
-- [ ] Python Tick 正确计算 Speed 值
-- [ ] `anim_inst.Speed` 每帧更新
-- [ ] BlendSpace 在 0~600 之间平滑切换 Idle/Walk/Jog/Sprint
-- [ ] 方向变化时 2D BlendSpace（如有）正确切换
-- [ ] 无抖动、无跳帧
+- [x] Python Tick 正确计算 Speed 值
+- [x] `anim_inst.Speed` 每帧更新
+- [x] BlendSpace 在 0~400 之间平滑切换 Idle/Walk/Jog
+- [ ] 方向变化时 2D BlendSpace（如有）正确切换（暂缺多方向动画素材）
+- [x] 无抖动、无跳帧
 
 ---
 
 ## 九、状态
 
-🔲 待开始
+✅ 已完成

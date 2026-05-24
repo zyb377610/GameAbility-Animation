@@ -41,6 +41,12 @@ def on_init():
     except Exception:
         traceback.print_exc()
 
+    # ---- 动画脚本模块 ----
+    try:
+        import animation.locomotion
+    except Exception:
+        traceback.print_exc()
+
 
 def on_shutdown():
     print('[GameAbilityAnim] Nepy shutdown.')
@@ -56,4 +62,9 @@ def on_tick(dt: float):
     每帧全局回调。
     脚本注册 GameMode / Tick 后由此驱动。
     """
-    pass
+    # Step 2.1: 驱动所有角色的 LocomotionUpdater
+    try:
+        from animation.locomotion import tick_all_characters
+        tick_all_characters(dt)
+    except Exception:
+        pass
