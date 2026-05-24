@@ -75,14 +75,25 @@ delegate.IsBound()             # 是否已绑定
 
 ```python
 delegate: ue.DynamicMulticastDelegateWrapper = some_component.on_component_hit
-delegate.Add(callback)         # 添加回调
+delegate.Add(callback)         # 添加回调（Python 函数）
 delegate.AddUnique(callback)   # 去重添加
 delegate.Remove(callback)      # 移除回调
 delegate.Clear()               # 清除所有回调
 delegate.Broadcast(*args)      # 广播触发
 delegate.Contains(callback)    # 是否包含某回调
 delegate.GetPythonCallbacks()  # 获取所有 Python 回调
+
+# 动态绑定 UFUNCTION 方法（推荐）
+delegate.AddDynamic(obj.Method)              # 绑定对象方法
+delegate.AddDynamicUnique(obj.Method)        # 去重绑定
+delegate.RemoveDynamic(obj.Method)           # 移除对象方法
+
+# 等效写法（冗余设计）
+delegate.AddDynamic(obj, Class.Method)
+delegate.AddDynamic(obj, obj.Method)
 ```
+
+> ⚠️ 数组容器作为委托参数时，回调必须返回该数组：`def callback(arr): ... return arr`
 
 ## 智能指针类型
 

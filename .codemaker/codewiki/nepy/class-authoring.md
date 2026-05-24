@@ -1,235 +1,510 @@
-# NePy 类编写完整指南
+# NEPY 类编写完整指南
 
-> 覆盖 `@ue.uclass` / `@ue.uproperty` / `@ue.ucomponent` / `@ue.ufunction` / `__init_default__` 的完整语法和对比。
+> 覆盖 Subclassing 全部语法：`@ue.uclass` / `@ue.ustruct` / `@ue.uenum` / `@ue.uproperty` / `@ue.ucomponent` / `@ue.ufunction` / `@ue.udelegate`
+
+> ⚠️ **试验性功能**：Subclassing 机制复杂，稳定性偶有问题，不建议在正式项目中大规模使用。
 
 ---
 
-## 一、`@ue.uclass()` — 注册 Python 类为 UE UClass
+## 一、`@ue.uclass()` — 定义 UE 类
 
-**必须用。** 不加这个装饰器，UE 反射系统不识别你的类，`InitStats`/`FindClass`/蓝图引用全部失效。
+让 Python 类能被 UE 反射系统识别。**必须用，不加则蓝图和 C++ 都无法识别。**
 
 ```python
-import ue
+@ue.uclass()
+class MyActor(ue.Actor):
+    """MyActor 是 AActor 的子类"""
+    pass
 
 @ue.uclass()
-class MyCharacter(ue.Character):
+class MyObject(ue.Object):
+    """MyObject 是 UObject 的子类"""
     pass
 ```
 
-| 要点 | 说明 |
+Python 中定义的 UE 类与 C++ 中定义的几乎无区别：可作为蓝图成员变量、蓝图函数参数/返回值、蓝图基类、Python 子类的基类。
+
+### 类说明符 (Class Specifiers)
+
+```python
+@ue.uclass(Abstract=True)           # 抽象类，不能直接实例化
+class AbstractActor(ue.Actor): pass
+
+@ue.uclass(DisplayName='MyActor')   # 自定义编辑器显示名称
+class ActorWithDisplayName(ue.Actor): pass
+
+@ue.uclass(HideCategories=('Navigation', 'Collision'))  # 隐藏属性分类
+class CleanActor(ue.Actor): pass
+```
+
+### 类元数据 (Meta)
+
+```python
+@ue.uclass(meta={'Tooltip': '在Python中定义的Actor类'})
+class MyActor(ue.Actor):
+    pass
+```
+
+> 元数据仅在编辑器中生效，打包后去除。
+
+### 类型注册
+
+**通过 `import` 模块即可注册。** 强烈建议在 `nepyinit.py` 中 import 所有 Subclassing 类，保证编辑器启动和打包时都能正确注册。
+
+### 使用限制
+
+| 限制 | 说明 |
 |------|------|
-| 无参数 | `@ue.uclass()` 不加任何参数 |
-| 父类 | 必须继承自 UE C++ 类（`ue.Actor`, `ue.Character`, `ue.AttributeSet`, `ue.GameplayAbility` 等）或已有的 `@ue.uclass()` 类 |
-| 注册时机 | import 模块时触发，所以必须在 `nepyinit.py` 的 `on_init()` 中 import |
+| 禁多继承 UE 类型 | `class X(ue.Actor, ue.Object)` ❌ |
+| 允许多继承 Python 类型 | `class X(ue.Actor, MyMixin)` ✅，但 UE 类型必须为第一基类 |
+| 禁继承蓝图类 | 蓝图类可被卸载，极其危险 |
+| 禁 `__init__` | 无法正常工作，用 `__init_default__` 替代 |
+| 禁重名 | Python 中定义的 UE 类型必须全局唯一 |
 
 ---
 
-## 二、`ue.uproperty(默认值)` — 暴露属性到 UE 反射
+## 二、`@ue.ustruct()` — 定义 UE 结构体
 
-**语法：`属性名 = ue.uproperty(默认值)`**
-
-必须写在 class body 层级，**不能**写在 `__init__` 或 `__init_default__` 中。
-
-### 支持的类型和默认值写法
-
-| Python 类型 | 写法 | 说明 |
-|-------------|------|------|
-| `float` | `Health = ue.uproperty(100.0)` | 健康值、伤害、速度等 |
-| `int` | `AmmoCount = ue.uproperty(30)` | 弹药、计数 |
-| `bool` | `IsAlive = ue.uproperty(True)` | 状态标记 |
-| `str` | `MontagePath = ue.uproperty('')` | 动画路径、名称 |
-| `ue.Vector` | `LastLocation = ue.uproperty(ue.Vector)` | 只传类型，无默认值 |
-| `ue.Rotator` | `LastRotation = ue.uproperty(ue.Rotator)` | 只传类型，无默认值 |
+继承 `ue.StructBase`，使用 `@ue.ustruct()` 装饰器：
 
 ```python
-@ue.uclass()
-class AttrSet_Base(ue.AttributeSet):
-    Health = ue.uproperty(100.0)
-    MaxHealth = ue.uproperty(100.0)
-    AttackPower = ue.uproperty(10.0)
-    MoveSpeed = ue.uproperty(600.0)
+@ue.ustruct()
+class MyStruct(ue.StructBase):
+    IntValue = ue.uproperty(int)
+    FloatValue = ue.uproperty(float)
+
+    def __init_default__(cdo):
+        cdo.IntValue = 3
+        cdo.FloatValue = 1.0
 ```
 
-### ⚠️ 常见错误
+支持作为：蓝图成员变量、蓝图函数参数/返回值、Python 中 UE 类的成员属性、其他结构体的成员。
+
+### 使用限制
+
+- **禁止 UFUNCTION** — UE 结构体不允许存在 `@ue.ufunction`
+- **禁止重名类型**
+- **禁止 `__init__`** — 用 `__init_default__` 设置默认值
+- **支持普通 Python 方法** — `def foo(self)` 是允许的
+
+### 结构体说明符与元数据
 
 ```python
-# ❌ 错误：纯 Python 类型注解不会注册到 UE 反射
-health: float = 100.0
+@ue.ustruct(DisplayName='MyStruct')
+class StructWithDisplayName(ue.StructBase): pass
 
-# ❌ 错误：写在 __init__ 里不会注册
-def __init__(self):
-    self.Health = ue.uproperty(100.0)
-
-# ✅ 正确：class body 层级用 ue.uproperty()
-Health = ue.uproperty(100.0)
+@ue.ustruct(meta={'Tooltip': '在Python中定义的结构体'})
+class MyStruct(ue.StructBase): pass
 ```
 
 ---
 
-## 三、`ue.ucomponent(类, attach='父组件名')` — 声明子组件
+## 三、`@ue.uenum()` — 定义 UE 枚举
 
-在 `@ue.uclass()` 类中声明蓝图可见的子组件。
+继承 `ue.EnumBase`，使用 `@ue.uenum()` 装饰器，用 `ue.uvalue()` 定义枚举值：
+
+```python
+@ue.uenum()
+class MyEnum(ue.EnumBase):
+    Red = ue.uvalue(1)
+    Green = ue.uvalue(2)
+    Blue = ue.uvalue(3)
+```
+
+可作为蓝图成员变量、函数参数/返回值、Python UE 类的属性类型。
+
+### 枚举说明符与元数据
+
+```python
+@ue.uenum(DisplayName='MyEnum')
+class EnumWithDisplayName(ue.EnumBase): pass
+
+@ue.uenum(meta={'DisplayName': '我的枚举'})
+class MyEnum(ue.EnumBase):
+    Red = ue.uvalue(1)
+    Green = ue.uvalue(2, meta={'Tooltip': '是绿色的'})
+```
+
+### 类型注册
+
+与类相同，通过 `import` 注册，建议在 `nepyinit.py` 中 import。
+
+---
+
+## 四、`ue.uproperty()` — 定义属性
+
+### 基本语法
 
 ```python
 @ue.uclass()
-class MyCharacter(ue.Character):
-    # 独立组件（会作为 Actor 的直接子组件）
-    SpringArm = ue.ucomponent(ue.SpringArmComponent)
-    
-    # 附着到其他组件
-    Camera = ue.ucomponent(ue.CameraComponent, attach='SpringArm')
-    
-    # 碰撞体
-    CollisionSphere = ue.ucomponent(ue.SphereComponent)
-    
-    # 可渲染组件
-    WeaponMesh = ue.ucomponent(ue.SkeletalMeshComponent)
-    BulletMesh = ue.ucomponent(ue.StaticMeshComponent, attach='CollisionSphere')
+class MyActor(ue.Actor):
+    # 基础类型 — 值即默认值
+    BoolValue = ue.uproperty(True)
+    IntValue = ue.uproperty(42)
+    FloatValue = ue.uproperty(3.14)
+    StringValue = ue.uproperty("hello")
+
+    # UE 类型 — 传类型即可
+    EnumValue = ue.uproperty(ue.EAxis)
+    StructValue = ue.uproperty(ue.Vector)
+    ObjectValue = ue.uproperty(ue.Object)
+
+    # 智能指针
+    ObjectClassValue = ue.uproperty(ue.TSubclassOf[ue.Object])
+    SoftObjectValue = ue.uproperty(ue.TSoftObjectPtr[ue.Object])
+    SoftClassValue = ue.uproperty(ue.TSoftClassPtr[ue.Object])
+    WeakObjectValue = ue.uproperty(ue.TWeakObjectPtr[ue.Object])
+
+    # 容器
+    StringArray = ue.uproperty([str])
+    StringSet = ue.uproperty({str})
+    StringIntMap = ue.uproperty({str: int})
+```
+
+### 自引用类型
+
+当属性类型就是定义类本身时，用 `ue.SelfClass`：
+
+```python
+@ue.uclass()
+class MyActor(ue.Actor):
+    ObjectValue = ue.uproperty(ue.SelfClass)
+    ObjectClassValue = ue.uproperty(ue.TSubclassOf[ue.SelfClass])
+```
+
+### 属性默认值 — `__init_default__`
+
+**用 `__init_default__` 而非 `__init__`**。该函数在类构建时（import 时）调用一次，设置到 CDO 上。`__init_default__` 的优先级高于声明时的默认值。
+
+```python
+@ue.uclass()
+class MyActor(ue.Actor):
+    IntValue = ue.uproperty(1)  # 声明默认值
+
+    def __init_default__(cdo):
+        cdo.IntValue = 2         # 覆盖为 2
+        cdo.BoolValue = True
+        cdo.StructValue = ue.Vector(0, 1, 0)
+        cdo.StringArrayValue = ['hi', 'nepy']
+        cdo.StringSetValue = {'hi', 'nepy'}
+        cdo.StringIntMapValue = {'hi': 1, 'nepy': 2}
+```
+
+### ⚠️ 禁止在 `__init_default__` 中初始化纯 Python 实例变量
+
+```python
+def __init_default__(self):
+    # ❌ 不生效或热重载后丢失
+    self._cache = {}
+    self._handle = None
+
+    # ✅ 正确：仅设置 ue.uproperty / ue.ucomponent 的 UE 默认值
+    self.CollisionComponent.SetSphereRadius(10.0)
+```
+
+需要 Python 状态时，在 `ReceiveBeginPlay` 中懒初始化。
+
+### 属性说明符 (Property Specifiers)
+
+```python
+Value1 = ue.uproperty(int, VisibleAnywhere=True)  # 只读显示
+Value2 = ue.uproperty(int, DisplayName='MyProp')  # 自定义显示名
+```
+
+> 默认行为（`EditAnywhere` + `BlueprintReadWrite`）可在 "项目设置 → 插件 → NePythonBinding" 中修改。
+
+### 属性访问器 (BlueprintGetter / BlueprintSetter)
+
+```python
+@ue.uclass()
+class MyActor(ue.Actor):
+    IntValue = ue.uproperty(int,
+        BlueprintGetter='IntValueGetter',
+        BlueprintSetter='IntValueSetter')
+
+    @ue.ufunction(ret=int, BlueprintGetter=True)
+    def IntValueGetter(self):
+        return self._IntValue
+
+    @ue.ufunction(params=(int,), BlueprintSetter=True)
+    def IntValueSetter(self, value):
+        self._IntValue = value
+```
+
+> 设置访问器后，直接访问属性会调用访问器。用 `_属性名` 访问原始值。
+
+---
+
+## 五、`ue.ucomponent()` — 定义组件
+
+```python
+@ue.uclass()
+class MyActor(ue.Actor):
+    SceneComp = ue.ucomponent(ue.SceneComponent)
+    MeshComp = ue.ucomponent(ue.StaticMeshComponent)
+
+    # 指定根组件
+    Root = ue.ucomponent(ue.BillboardComponent, root=True)
+
+    # 指定附着关系（ComponentName 即 Python 变量名）
+    ChildComp = ue.ucomponent(ue.BoxComponent, attach='Root')
+
+    # Override 父类组件类型
+    OverriddenComp = ue.ucomponent(ue.StaticMeshComponent, override="SceneComp")
 ```
 
 | 参数 | 说明 |
 |------|------|
-| 第一个参数 | 组件类（如 `ue.SpringArmComponent`） |
-| `attach='Name'` | 父组件在本类中的属性名（字符串） |
+| 第一个参数 | 组件类（支持几乎所有 ActorComponent 子类） |
+| `root=True` | 指定为根组件 |
+| `attach='CompName'` | 附着到另一个组件上 |
+| `override='CompName'` | 覆写父类同名组件的类型 |
+
+> ⚠️ 当前版本 `reload` 还有问题，修改 RootComponent 后只能创建新蓝图。
+
+### 组件继承
+
+子类自动继承父类所有组件属性（含 C++ Native 父类的组件）。
 
 ---
 
-## 四、`@ue.ufunction()` — 标记方法为 UFUNCTION
+## 六、`@ue.ufunction()` — 定义方法
 
-### 两种模式
+### 基本用法
 
 ```python
 @ue.uclass()
 class MyActor(ue.Actor):
 
-    @ue.ufunction()            # BlueprintCallable + AnimNotify 可调用
-    def MyCustomEvent(self):
-        """蓝图、AnimNotify 可以调这个方法"""
+    @ue.ufunction()                            # 无参无返回值
+    def FuncA(self):
         pass
 
-    @ue.ufunction(override=True)  # 覆盖父类已有 UFUNCTION
+    @ue.ufunction(params=(int, float))         # 指定参数类型
+    def FuncB(self, IntParam, FloatParm):
+        pass
+
+    @ue.ufunction(params=(int, float), ret=bool)  # 指定返回值类型
+    def FuncC(self, IntParam, FloatParm):
+        return True
+
+    @ue.ufunction(params=(int, float), ret=(bool, str))  # 多返回值
+    def FuncD(self, IntParam, FloatParm):
+        return True, 'hi'
+```
+
+> 默认带有 `BlueprintCallable` 标记，可在蓝图中调用。可在插件设置中修改此默认行为。
+
+### 参数和返回值支持的类型
+
+```python
+@ue.ufunction(params=(
+    bool,               # 布尔值
+    int,                # 整数
+    float,              # 浮点数
+    str,                # 字符串
+    ue.EAxis,           # 枚举值
+    ue.Object,          # 对象引用
+    ue.Vector,          # 结构体
+    [str],              # 数组
+    {str},              # 集合
+    {str: int}          # 字典
+), ret=bool)
+def Foo(self, BoolParam, IntParam, FloatParam, StringParam, EnumParam, ObjectParam, StructParam, StringArrayParam, StringSetParam, StringIntMapParam):
+    return True
+```
+
+### 方法覆写 `override=True`
+
+用于覆写 C++ 基类的 `BlueprintImplementableEvent` 或 `BlueprintNativeEvent`：
+
+```python
+@ue.uclass()
+class MyActor(ue.Actor):
+    @ue.ufunction(override=True)
     def ReceiveBeginPlay(self):
-        """覆盖 Actor::ReceiveBeginPlay"""
-        pass
+        ue.LogWarning("BeginPlay!")
+
+# 调用基类方法
+@ue.uclass()
+class MyChildActor(MyActor):
+    @ue.ufunction(override=True)
+    def ReceiveBeginPlay(self):
+        super(MyChildActor, self).ReceiveBeginPlay()
+        ue.LogWarning("Child BeginPlay!")
 ```
 
-| 装饰器 | 用途 |
-|--------|------|
-| `@ue.ufunction()` | 新增 BlueprintCallable 方法。AnimNotify 可调用。 |
-| `@ue.ufunction(override=True)` | 覆盖父类的 UFUNCTION。常用：`ReceiveBeginPlay`, `ReceiveTick`, `ReceiveAnyDamage`, `ReceiveEndPlay` |
+> ⚠️ 覆写时不可再用 `params` 或 `ret`。
+
+### BlueprintEvent — 让蓝图覆写 Python 方法
+
+```python
+@ue.ufunction(params=(int, float), ret=bool, BlueprintEvent=True)
+def FuncC(self, IntParam, FloatParm):
+    return True
+```
+
+蓝图子类可覆写此方法，调用 Parent 节点执行 Python 基类逻辑。
+
+### 静态方法与 Pure 方法
+
+```python
+# 静态方法
+@ue.ufunction(params=(int, float), ret=(bool, str))
+@staticmethod()
+def StaticFunc(IntParam, FloatParam):
+    return True, 'hi'
+
+# Pure 方法（蓝图中无执行 Pin）
+@ue.ufunction(ret=bool, BlueprintPure=True)
+def PureFunc(self):
+    return True
+```
+
+### 引用参数 `ue.ref()`
+
+等价于 C++ 的 `UPARAM(ref)`，用于参数既是输入也是输出：
+
+```python
+@ue.ufunction(params=(ue.ref(int), float, ue.ref(int)))
+def FuncA(self, IntParamRef, FloatParam, IntParam2Ref):
+    # ue.ref 参数作为额外返回值，追加在常规返回值之后
+    return IntParamRef * 1, IntParam2Ref * 2
+```
+
+### 参数元数据 `ue.uparam()`
+
+```python
+@ue.ufunction(
+    params=(ue.uparam(str, DisplayName='名称'),),
+    ret=(ue.uparam(ue.Actor, DisplayName='Npc对象')))
+def SpawnNpc(self, Name):
+    ...
+```
+
+### 方法说明符 (Function Specifiers)
+
+```python
+@ue.ufunction(CallInEditor=True)            # 编辑器中作为按钮
+def Foo(self): pass
+
+@ue.ufunction(Server=True, Reliable=True)   # 网络：服务器执行，可靠传输
+def Bar(self): pass
+```
+
+### 方法元数据
+
+```python
+@ue.ufunction(params=(int, float), ret=bool, meta={'Tooltip': '在Python中定义的方法'})
+def Bar(self, IntParam, FloatParm):
+    return True
+```
 
 ---
 
-## 五、`__init_default__()` — CDO 初始化
+## 七、`ue.udelegate()` — 定义委托
 
-**用 `__init_default__` 替代 `__init__`。**
-
-Nepy 中 `@ue.uclass()` 类的构造函数是 `__init_default__`，它在类注册为 CDO（Class Default Object）时调用一次，不是每次创建实例时调用。
+### 委托作为成员属性（多播委托）
 
 ```python
 @ue.uclass()
 class MyActor(ue.Actor):
-    CollisionSphere = ue.ucomponent(ue.SphereComponent)
-
-    def __init_default__(self):
-        """CDO 初始化 — 只调用一次"""
-        self.CollisionSphere.SetSphereRadius(10.0)
-        self.CollisionSphere.SetCollisionProfileName("OverlapAll")
+    DelegateProp = ue.udelegate(params=((int, 'Param1'), (int, 'Param2')))
 ```
 
-⚠️ **不要用 `__init__`** — Nepy 的 `@ue.uclass()` 类不支持 Python 标准的 `__init__`。
-
-### ⚠️ 禁止在 `__init_default__` 中初始化纯 Python 实例变量
-
-**这是最常见的踩坑点。** `self.xxx = value` 只在 CDO 创建时执行一次，且热重载/实例复制时会丢失。
-
+**Python 中使用**：
 ```python
-@ue.uclass()
-class MyClass(ue.Object):
-    def __init_default__(self):
-        # ❌ 错误：以下赋值均不生效（或只在 CDO 上短暂存在）
-        self._cache = {}
-        self._handle = None
-        self._callback = None
-        self._listener_ref = some_object  # 热重载后丢失
-
-        # ✅ 正确：仅对 ue.ucomponent 配置默认值
-        self.CollisionComponent.SetSphereRadius(10.0)
+actor.DelegateProp.Add(callback)
+actor.DelegateProp.Broadcast(123, 456)
 ```
 
-**为什么会失败？**
+**动态绑定**：
+```python
+# 推荐写法
+actor.DelegateProp.AddDynamic(o.Func)
 
-1. `__init_default__` 在 CDO 上执行，CDO 是 C++ 对象模板，Python shadow 对象上的 `self.xxx` 不被序列化
-2. 每次从 CDO 复制实例时，Python 成员不会被复制到新实例
-3. NePy 会打印警告：
-   > `you are trying to initialize python members in 'XXX.__init_default__()', which will take no effect.`
+# 等效写法
+actor.DelegateProp.AddDynamic(o, Class.Func)
+actor.DelegateProp.AddDynamic(o, o.Func)
 
-**替代方案：**
+# 移除同理
+actor.DelegateProp.RemoveDynamic(o.Func)
+```
 
-| 场景 | 正确做法 |
-|------|---------|
-| 需要实例级 Python 状态 | 在 `ReceiveBeginPlay` / 普通方法中赋值，**首次访问时懒初始化** |
-| 需要缓存/回调引用 | 用模块级变量 + 闭包，**不依赖 `@ue.uclass()` 类** |
-| 简单配置常量 | 用 `ue.uproperty()` 声明（写在 class body 层级） |
-| 不需要 UE 反射的状态 | 考虑这段逻辑是否真的需要放在 `@ue.uclass()` 类里；很多场景用**纯 Python 函数 + 闭包**更简洁可靠 |
+**蓝图中使用**：Python 中定义的委托成员类似蓝图 Event Dispatcher，可在蓝图子类中绑定。
+
+### 委托作为方法参数（单播委托）
 
 ```python
-# ✅ 懒初始化模式
 @ue.uclass()
 class MyActor(ue.Actor):
-    def get_cache(self):
-        if not hasattr(self, '_cache'):
-            self._cache = {}
-        return self._cache
-
-# ✅ 更推荐：不需要 UE 反射的场景，直接用普通 Python
-def create_tag_listener(asc, mesh):
-    """纯 Python 函数，闭包持有状态，不需要 @ue.uclass()"""
-    anim_inst = mesh.GetAnimInstance()
-    def on_changed(tag, count):
-        setattr(anim_inst, "bIsHit", count > 0)
-    handle = bind_tag_event(asc, on_changed)
-    return handle  # 调用者负责管理生命周期
+    @ue.ufunction(params=(ue.udelegate(params=(int, int))))
+    def FuncTakesDelegateParam(self, delegate):
+        delegate.ExecuteIfBound(123, 456)
 ```
 
-### vs. 普通 `ReceiveBeginPlay`
+蓝图可向此函数传递委托参数。
 
-| 方法 | 调用时机 | 用途 |
-|------|---------|------|
-| `__init_default__` | 类注册时（一次） | **仅**设置组件默认值、碰撞配置 |
-| `ReceiveBeginPlay` | 每个实例开始游戏时 | 绑定委托、初始化运行时状态、懒初始化 Python 变量 |
+### 委托元数据
+
+```python
+DelegateProp = ue.udelegate(
+    params=((int, 'Param1'), (int, 'Param2')),
+    meta={'DisplayName': '在Python中定义的委托'})
+```
+
+> ⚠️ 数组容器作为委托参数时，必须在回调返回值中追加此数组参数。
 
 ---
 
-## 六、汇总示例
+## 八、汇总示例
 
 ```python
 import ue
 
+# 枚举
+@ue.uenum()
+class EWeaponType(ue.EnumBase):
+    Melee = ue.uvalue(1)
+    Range = ue.uvalue(2)
+
+# 结构体
+@ue.ustruct()
+class FWeaponStats(ue.StructBase):
+    Damage = ue.uproperty(float)
+    FireRate = ue.uproperty(float)
+
+# 类
 @ue.uclass()
 class BP_GASCharacter(ue.Character):
-    # === UProperties ===
+    # 属性
     Health = ue.uproperty(100.0)
-    MaxHealth = ue.uproperty(100.0)
-    IsDead = ue.uproperty(False)
+    WeaponType = ue.uproperty(EWeaponType)
+    Stats = ue.uproperty(FWeaponStats)
 
-    # === UComponents ===
+    # 组件
     SpringArm = ue.ucomponent(ue.SpringArmComponent)
     Camera = ue.ucomponent(ue.CameraComponent, attach='SpringArm')
 
-    # === CDO Init ===
+    # 委托
+    OnHealthChanged = ue.udelegate(params=((float, 'OldValue'), (float, 'NewValue')))
+
+    # CDO 初始化
     def __init_default__(self):
         self.SpringArm.TargetArmLength = 300.0
+        self.Stats = FWeaponStats()
+        self.Stats.Damage = 50.0
 
-    # === Overrides ===
+    # 覆写
     @ue.ufunction(override=True)
     def ReceiveBeginPlay(self):
-        ue.log(f"[{self.get_name()}] BeginPlay")
+        ue.Log(f"[{self.get_name()}] BeginPlay, Health={self.Health}")
 
-    # === BlueprintCallable ===
-    @ue.ufunction()
-    def TakeDamage(self, Amount: float):
+    # BlueprintCallable
+    @ue.ufunction(params=(float,), ret=bool)
+    def TakeDamage(self, Amount: float) -> bool:
+        old_health = self.Health
         self.Health -= Amount
-        if self.Health <= 0:
-            self.IsDead = True
+        self.OnHealthChanged.Broadcast(old_health, self.Health)
+        return self.Health <= 0
 ```

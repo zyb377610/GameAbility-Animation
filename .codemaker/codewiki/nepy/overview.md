@@ -1,47 +1,116 @@
-# NePy (NePythonBinding) 插件概述
+# NEPY 概述与核心概念
 
 ## 简介
 
-NePy 是一个为 Unreal Engine 5 提供 Python 脚本支持的插件，支持在 UE 编辑器内和运行时执行 Python 代码，并且支持热更新。
+**NEPY** (NePythonBinding) 是网易自研的 Unreal Engine Python 脚本插件。它利用 UE 自带的类型反射数据，将 C++ 的 `UCLASS`/`USTRUCT`/`UFUNCTION`/`UPROPERTY`/`UENUM` **1:1** 导出至 Python，使开发者能用 Python 编写游戏逻辑。
 
-## 插件位置
+## 核心设计理念
 
-插件根目录：`Plugins/NePythonBinding/`
+> **用蓝图做的任何事情，都可以用同样的方法在 Python 里实现。**
 
-## API 文档（类型桩）
+NEPY 推荐的最佳使用方式：
 
-NePy 提供了完整的 Python 类型桩（`.pyi`）文件，用于 IDE 代码补全和类型检查，同时也是最完整的 API 参考文档。
+| 层级 | 用途 | 为什么 |
+|------|------|--------|
+| **蓝图** | 对象组装（添加 Component、挂接特效/音频、配置参数） | 可视化组装效率高 |
+| **Python** | 玩法逻辑（游戏规则、技能系统、AI 行为） | 可读性好、可版本管理、可热更 |
+| **C++** | 性能关键模块、底层基础设施 | 只在必要时用，编译慢 |
 
-文档位置：`Plugins/NePythonBinding/Tools/pystubs/ue/`
+## 两种绑定机制
 
-包含以下文件：
+NEPY 提供两种 UE ↔ Python 交互方式：
 
-| 文件 | 说明 |
-|------|------|
-| `__init__.pyi` | 完整的 UE 引擎 API（类、枚举、结构体、顶层函数），约 10MB |
-| `blueprint_doc.pyi` | 项目中蓝图生成的类、结构体和枚举 |
-| `builtin_doc.pyi` | NePy 内置封装类型（容器、委托、装饰器等） |
-| `internal.pyi` | 内部辅助定义 |
-
-## 基本使用
+### 1. 动态绑定（Dynamic Binding）
+运行时自动将 UE 反射类型映射为 Python 对象。**无需任何配置**，只要有反射标记就可用。
 
 ```python
 import ue
-
-# 获取资产
-obj = ue.load_object(klass, '/Game/Path/To/Asset')
-
-# 调用 UE 函数
-actor = ue.get_editor_subsystem(ue.UnrealEditorSubsystem).get_selected_level_actors()[0]
-actor.set_actor_location(ue.Vector(100, 200, 300), False, False)
-
-# 子类化 UE 类
-@ue.uclass()
-class MyActor(ue.Actor):
-    def receive_begin_play(self):
-        ue.Log("Hello from Python!")
+# 直接调用 UE API
+actor = ue.NewObject(ue.Actor)
+actor.SetActorLocation(ue.Vector(100, 200, 300))
 ```
 
-## 热更新
+### 2. Subclassing（静态类定义）
+在 Python 中用特殊语法**定义能被 UE 识别的类型**，反其道而行之。详见 [`class-authoring.md`](class-authoring.md)。
 
-NePy 支持运行时热更新 Python 脚本，修改代码后无需重启编辑器即可生效。具体机制参考插件自身的 Python 运行时模块。
+```python
+@ue.uclass()
+class MyCharacter(ue.Character):
+    Health = ue.uproperty(100.0)
+
+    @ue.ufunction(override=True)
+    def ReceiveBeginPlay(self):
+        ue.LogWarning("Hello from Python!")
+```
+
+## 三种运行环境
+
+NEPY 会在以下三种环境中加载 `nepyinit.py`，**必须区分处理**：
+
+```python
+def on_init():
+    if ue.GIsEditor:
+        # 编辑器环境（含 PIE）
+        pass
+    elif ue.IsRunningCommandlet():
+        # Commandlet 环境（如打包时）
+        pass
+    else:
+        # 纯游戏环境（打包后的 .exe）
+        pass
+```
+
+## 脚本目录优先级
+
+NEPY 按以下顺序查找脚本根目录，**第一个存在的目录会被使用**：
+
+```
+D:/
+├── script              [1] 最高优先级
+├── MyGame
+    ├── RawScripts      [2] 次优先级（推荐）
+    └── Content
+        └── Scripts     [3] 最低优先级（自动开启 Redirect）
+```
+
+**推荐**：将脚本放在 `<ProjectDir>/RawScripts/`，既方便源码管理，又不触发 Redirect。
+
+### 自定义脚本根目录
+
+在 `DefaultGame.ini` 中配置：
+
+```ini
+[NEPY]
+PythonScriptPath=MyScripts   ; 相对于 ProjectDir 的路径
+NeedRedirect=False
+```
+
+## API 文档（类型桩）
+
+NEPY 提供完整的 `.pyi` 文件用于 IDE 代码补全：
+
+| 文件 | 位置 | 说明 |
+|------|------|------|
+| `__init__.pyi` | `NePythonBinding/Tools/pystubs/ue/` | 完整 UE 引擎 API（约 10MB） |
+| `blueprint_doc.pyi` | 同上 | 项目蓝图生成的类 |
+| `builtin_doc.pyi` | 同上 | NePy 内置封装类型 |
+
+将其路径添加到 VSCode Python 的 `extraPaths` 即可获得代码提示。
+
+## 日志输出
+
+```python
+print("普通输出")            # LogNePython 类别
+ue.Log("信息")               # Log 级别
+ue.LogWarning("警告")        # Warning 级别
+ue.LogError("错误")          # Error 级别
+```
+
+## 快速对比：蓝图 vs Python
+
+| 蓝图操作 | Python 等效 |
+|---------|------------|
+| Spawn Decal at Location | `ue.GameplayStatics.SpawnDecalAtLocation(...)` |
+| Get Actor Location | `actor.GetActorLocation()` |
+| Set Timer by Function Name | `timer_mgr.SetTimer(callback, 1.0)` |
+| Bind Event | `component.OnComponentHit.Add(callback)` |

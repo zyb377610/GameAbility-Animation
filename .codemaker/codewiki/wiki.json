@@ -2,44 +2,74 @@
   "codewiki": {
     "entries": [
       {
-        "title": "NePy 插件概述",
-        "description": "NePythonBinding (NePy) 插件的整体介绍、安装方式和基本使用流程",
-        "tags": ["nepy", "python", "ue", "plugin", "overview"],
+        "title": "NEPY 概述与核心概念",
+        "description": "NEPY (NePythonBinding) 的整体介绍、核心设计理念、三种运行环境（编辑器/Commandlet/纯游戏）、脚本目录优先级",
+        "tags": ["nepy", "overview", "core-concept", "environment"],
         "path": "nepy/overview"
       },
       {
-        "title": "NePy API Stubs 结构指南",
-        "description": "UE Python API 类型桩(stubs)文件的组织结构，如何查找具体的类、枚举、结构体和函数",
-        "tags": ["nepy", "api", "stubs", "reference"],
-        "path": "nepy/api-stubs"
-      },
-      {
-        "title": "NePy 内置类型参考",
-        "description": "ArrayWrapper、MapWrapper、委托、软引用等 NePy 内置封装类型的 API 参考",
-        "tags": ["nepy", "builtin", "types", "container", "delegate"],
-        "path": "nepy/builtin-types"
-      },
-      {
-        "title": "NePy 常用编程模式",
-        "description": "委托绑定、资产加载、Actor 遍历、Vector/Rotator/Transform、编辑器工具等常见使用模式",
-        "tags": ["nepy", "pattern", "example", "delegate", "asset"],
-        "path": "nepy/usage-patterns"
-      },
-      {
-        "title": "NePy 类编写完整指南",
-        "description": "@ue.uclass / @ue.uproperty / @ue.ucomponent / @ue.ufunction / __init_default__ 的完整语法、常见错误和对比",
-        "tags": ["nepy", "uclass", "uproperty", "ucomponent", "ufunction", "class-authoring"],
-        "path": "nepy/class-authoring"
-      },
-      {
-        "title": "NePy 项目搭建与运行",
-        "description": "nepyinit.py 生命周期、import 链触发类注册、FindClass 两阶段 Spawn、热重载陷阱、项目骨架模板",
-        "tags": ["nepy", "project-setup", "nepyinit", "spawn", "hot-reload"],
+        "title": "NEPY 项目搭建与生命周期",
+        "description": "nepyinit.py 全部回调函数（on_init/on_shutdown/on_post_engine_init/on_tick/on_debug_input）、GameInstance代理模式、脚本目录结构、import即注册机制",
+        "tags": ["nepy", "project-setup", "nepyinit", "game-instance", "lifecycle"],
         "path": "nepy/project-setup"
       },
       {
-        "title": "NePy GAS 开发踩坑指南",
-        "description": "NePy中使用GAS的CDO限制、CommitAbility替代、蓝图加载方式、GE Modifiers配置、GameplayTag设置等关键踩坑记录",
+        "title": "NEPY 类编写完整指南",
+        "description": "@ue.uclass / @ue.ustruct / @ue.uenum / @ue.uproperty / @ue.ucomponent / @ue.ufunction / @ue.udelegate 的完整语法、所有 Specifier、__init_default__、限制与最佳实践",
+        "tags": ["nepy", "uclass", "ustruct", "uenum", "uproperty", "ucomponent", "ufunction", "udelegate", "subclassing"],
+        "path": "nepy/class-authoring"
+      },
+      {
+        "title": "NEPY 热重载机制",
+        "description": "reloader.py func_code swap 原理、reload_monitor.py 自动监听、@reload 对 @ue.uclass() 的限制、热重载失效场景与处理",
+        "tags": ["nepy", "hot-reload", "reloader", "reload-monitor"],
+        "path": "nepy/hot-reload"
+      },
+      {
+        "title": "NEPY GM指令框架",
+        "description": "基于 on_debug_input 的 @ 前缀GM指令系统、gmcmds.py 框架、带参数指令、与 Python Console 共存的机制",
+        "tags": ["nepy", "gm-commands", "debug-input", "on_debug_input"],
+        "path": "nepy/gm-commands"
+      },
+      {
+        "title": "NEPY Ticker与Timer",
+        "description": "ue.AddTicker/RemoveTicker、TimerManager 延迟调用、引擎Tick完整顺序（12个阶段）、nepyinit.on_tick vs GameInstance tick 回调时机",
+        "tags": ["nepy", "ticker", "timer", "tick-order"],
+        "path": "nepy/ticker-timer"
+      },
+      {
+        "title": "NEPY 常用编程模式",
+        "description": "资产加载（LoadClass/LoadObject/AsyncLoad/OwnByPython）、SpawnActor、委托绑定（AddDynamic/RemoveDynamic）、输入处理（BindAxis/BindAction）、IsA 类型判断",
+        "tags": ["nepy", "pattern", "load-class", "spawn-actor", "delegate", "input"],
+        "path": "nepy/usage-patterns"
+      },
+      {
+        "title": "NEPY 内置类型参考",
+        "description": "ArrayWrapper、MapWrapper、SetWrapper、DynamicDelegateWrapper、TSoftObjectPtr、TSoftClassPtr、TWeakObjectPtr、TSubclassOf 等内置封装类型的 API",
+        "tags": ["nepy", "builtin", "types", "container", "delegate", "smart-pointer"],
+        "path": "nepy/builtin-types"
+      },
+      {
+        "title": "NEPY 对象生命周期管理",
+        "description": "UObject vs 结构体/枚举的生命周期区别、值拷贝陷阱、OwnByPython/DisownByPython、UE GC 与 Python GC 的关系、IsValid 防护",
+        "tags": ["nepy", "lifecycle", "gc", "own-by-python", "value-copy"],
+        "path": "nepy/object-lifecycle"
+      },
+      {
+        "title": "NEPY 调试与日志排查",
+        "description": "Python调用堆栈获取、崩溃时自动输出堆栈、Subclassing 详细日志 CVAR、PyCharm 远程调试接入、关键日志搜索关键词",
+        "tags": ["nepy", "debug", "log", "pycharm", "stack-trace", "crash-handler"],
+        "path": "nepy/debug-log"
+      },
+      {
+        "title": "NEPY 打包与扩展导出",
+        "description": "PAK/离散文件/补丁三种打包方式、符号链接技巧、ExportConfig 配置导出引擎模块/插件/游戏模块、排除项配置",
+        "tags": ["nepy", "packaging", "export", "pak", "export-config"],
+        "path": "nepy/packaging-export"
+      },
+      {
+        "title": "NEPY GAS 开发踩坑指南",
+        "description": "NePy中使用GAS的CDO限制、CommitAbility替代方案、蓝图加载方式（FindObject优先）、GE Modifiers配置、GameplayTag设置、Asc运行时初始化",
         "tags": ["nepy", "gas", "gameplay-ability", "pitfalls", "cdo", "commit-ability", "ge"],
         "path": "nepy/gas-pitfalls"
       }

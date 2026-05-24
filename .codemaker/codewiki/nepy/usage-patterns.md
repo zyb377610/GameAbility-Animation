@@ -1,174 +1,261 @@
-# NePy 常用编程模式
+# NEPY 常用编程模式
 
-## 子类化 UE 类
+## 一、资产加载
 
-使用 `@ue.uclass()` 装饰器子类化 UE 类。**注意：`@ue.uclass()` 必须用，否则 UE 反射系统不会注册你的类。**
+### LoadClass — 加载蓝图类
 
 ```python
-import ue
+# 同步加载蓝图类（注意 _C 后缀）
+bullet_bp = ue.LoadClass('/Game/MyBulletBP.MyBulletBP_C')
 
-@ue.uclass()
-class MyActor(ue.Actor):
-    """自定义 Actor"""
-    
-    def receive_begin_play(self):
-        ue.log(f"{self.get_name()} begin play from Python!")
-        super().receive_begin_play()
-    
-    def receive_tick(self, delta_seconds: float):
-        pass
+# ⚠️ 加载后如不立即使用，必须调用 OwnByPython 防止 GC
+bullet_bp.OwnByPython()
+```
 
-# 方法如需被蓝图/AnimNotify 调用，加 @ue.ufunction()
+### LoadObject — 加载非蓝图资产
+
+```python
+texture = ue.LoadObject(ue.Texture2D, '/Game/Textures/MyTexture')
+mesh = ue.LoadObject(ue.StaticMesh, '/Game/Meshes/MyMesh')
+```
+
+### 异步加载（避免卡顿）
+
+```python
+ue.AsyncLoadClass('/Game/MyBulletBP.MyBulletBP_C')
+ue.AsyncLoadObject(ue.StaticMesh, '/Game/Meshes/MyMesh')
+```
+
+### PIE 中加载蓝图：FindObject 优先
+
+`ue.LoadObject` 在 PIE 中可能失败。**推荐加载顺序**：
+
+```python
+def _load_class(self, path, class_name):
+    # 1. FindObject（PIE 可用）
+    obj = ue.FindObject(f"/Game/Path/{class_name}.{class_name}_C")
+    if obj: return obj
+
+    # 2. LoadClass（同步加载）
+    obj = ue.LoadClass(f"/Game/Path/{class_name}.{class_name}_C")
+    if obj: return obj
+
+    # 3. Python 类引用（仅当 import 链正常）
+    from my_module import MyPythonClass
+    return MyPythonClass.Class()
+```
+
+### LoadClass vs LoadObject
+
+| API | 用途 | 后缀 |
+|-----|------|------|
+| `ue.LoadClass(path)` | 加载蓝图**类** | `_C` 后缀 |
+| `ue.LoadObject(type, path)` | 加载**资产**（纹理、模型等） | 无 `_C` 后缀 |
+| `ue.FindObject(path)` | 从内存查找已加载的对象 | `_C` 后缀 |
+
+---
+
+## 二、SpawnActor — 创建对象实例
+
+### 使用 World.SpawnActor（简单场景）
+
+```python
+world = self.GetWorld()
+location = mesh.GetSocketLocation('Muzzle')
+rotation = mesh.GetSocketRotation('Muzzle')
+
+# 以蓝图类为模板，创建实例并放入场景
+bullet = world.SpawnActor(bullet_class, location, rotation)
+```
+
+### 使用两阶段 Spawn（需要设属性）
+
+```python
+# 阶段1：创建未初始化 Actor
+actor = ue.GameplayStatics.BeginDeferredActorSpawnFromClass(
+    self, spawn_class, spawn_transform
+)
+# 阶段2之间：设置属性
+actor.SomeProperty = some_value
+# 阶段2：完成初始化
+ue.GameplayStatics.FinishSpawningActor(actor, spawn_transform)
+```
+
+### 运行时从 Python 类名查找 UClass
+
+```python
+# ❌ 不能直接用 Python class
+# world.SpawnActor(MyPythonClass, ...)
+
+# ✅ 用 FindClass 获取 UClass
+spawn_class = ue.FindClass('MyPythonClassName')
+actor = ue.GameplayStatics.BeginDeferredActorSpawnFromClass(
+    self, spawn_class, spawn_transform
+)
+```
+
+---
+
+## 三、委托绑定
+
+### 绑定 C++ 委托到 Python 回调
+
+```python
 @ue.uclass()
-class MyAnimInstance(ue.AnimInstance):
-    
-    @ue.ufunction()  # → BlueprintCallable
-    def on_some_event(self):
-        pass
-    
-    @ue.ufunction(override=True)  # → 覆盖父类 UFUNCTION
+class MyBullet(ue.Actor):
+    @ue.ufunction(override=True)
     def ReceiveBeginPlay(self):
-        pass
-```
-
-## UProperty / UFUNCTION / UComponent 定义
-
-详见 [`class-authoring.md`](class-authoring.md)。这里只给最简示例：
-
-```python
-@ue.uclass()
-class MyActor(ue.Actor):
-    # UProperty — 必须用 ue.uproperty(默认值)
-    Health = ue.uproperty(100.0)
-    IsAlive = ue.uproperty(True)
-    
-    # UComponent — 声明子组件
-    MyMesh = ue.ucomponent(ue.StaticMeshComponent)
-    
-    # CDO 初始化 — 用 __init_default__，不用 __init__
-    def __init_default__(self):
-        self.MyMesh.SetStaticMesh(...)
-```
-
-## 委托绑定
-
-```python
-@ue.uclass()
-class MyActor(ue.Actor):
-    def receive_begin_play(self):
         # 绑定碰撞事件
-        mesh = self.get_component_by_class(ue.StaticMeshComponent)
-        if mesh:
-            mesh.on_component_begin_overlap.Add(self.on_overlap)
-    
-    def on_overlap(self, overlapped_component, other_actor, other_comp, other_body_index, from_sweep, sweep_result):
-        ue.log(f"Overlapped with {other_actor.get_name()}")
+        collision_comp = self.SphereCollision  # type: ue.SphereComponent
+        collision_comp.OnComponentHit.Add(self._on_hit)
+
+    def _on_hit(self, hit_comp, other_actor, other_comp, normal_impulse, hit):
+        # type: (ue.PrimitiveComponent, ue.Actor, ue.PrimitiveComponent, ue.Vector, ue.HitResult) -> None
+        if other_comp.IsSimulatingPhysics():
+            other_comp.AddImpulseAtLocation(
+                self.GetVelocity() * 100,
+                self.GetActorLocation()
+            )
 ```
 
-## 资产加载
+### 常用委托
+
+| 委托 | 所在组件 | 触发时机 |
+|------|---------|---------|
+| `OnComponentHit` | PrimitiveComponent | 物理碰撞 |
+| `OnComponentBeginOverlap` | ShapeComponent | 重叠开始 |
+| `OnComponentEndOverlap` | ShapeComponent | 重叠结束 |
+
+### 注意：只能使用动态委托
+
+只有以 `DECLARE_DYNAMIC` 开头的委托才能在 Python 中使用。静态委托绑定的是编译期函数，无法绑定 Python/蓝图回调。
+
+---
+
+## 四、输入处理
+
+### 轴映射（Axis）- 持续输入
+
+在项目设置中配置输入映射后：
 
 ```python
-import ue
-
-# 同步加载资产
-texture = ue.load_object(ue.Texture2D, '/Game/Textures/MyTexture')
-mesh = ue.load_object(ue.StaticMesh, '/Game/Meshes/MyMesh')
-
-# 使用软引用
 @ue.uclass()
-class MyActor(ue.Actor):
-    soft_mesh: ue.TSoftObjectPtr[ue.StaticMesh] = None
-    
-    def receive_begin_play(self):
-        if self.soft_mesh.IsValid():
-            mesh = self.soft_mesh.Get()
-        elif not self.soft_mesh.IsNull():
-            mesh = self.soft_mesh.LoadSynchronous()
+class MyCharacter(ue.Character):
+    @ue.ufunction(override=True)
+    def ReceiveBeginPlay(self):
+        self.InputComponent.BindAxis('MoveForward', self._move_forward)
+        self.InputComponent.BindAxis('MoveRight', self._move_right)
+        self.InputComponent.BindAxis('TurnRight', self._turn_right)
+        self.InputComponent.BindAxis('LookUp', self._look_up)
+
+    def _move_forward(self, value):
+        if value != 0:
+            self.AddMovementInput(self.GetActorForwardVector(), value)
+
+    def _move_right(self, value):
+        if value != 0:
+            self.AddMovementInput(self.GetActorRightVector(), value)
+
+    def _turn_right(self, value):
+        self.AddControllerYawInput(value * self.MouseSpeed * ue.GetDeltaTime())
+
+    def _look_up(self, value):
+        self.AddControllerPitchInput(value * self.MouseSpeed * ue.GetDeltaTime())
 ```
 
-## 获取 / 遍历 Actor
+### 操作映射（Action）- 单次触发
 
 ```python
-import ue
-
-# 通过编辑器子系统获取选中的 Actor
-editor_subsystem = ue.get_editor_subsystem(ue.UnrealEditorSubsystem)
-selected_actors = editor_subsystem.get_selected_level_actors()
-
-# 遍历世界中所有 Actor
-world = ue.get_editor_subsystem(ue.UnrealEditorSubsystem).get_editor_world()
-actor_iterator = ue.PyIterator(ue.Actor, world)
-for actor in actor_iterator:
-    ue.log(actor.get_name())
-
-# 按标签查找
-tagged_actors = ue.PyUtil.get_actors_by_tag(world, "MyTag")
+self.InputComponent.BindAction('Jump', ue.EInputEvent.IE_Pressed, self._jump)
+self.InputComponent.BindAction('Fire', ue.EInputEvent.IE_Pressed, self._fire)
 ```
 
-## 世界与关卡操作
+---
+
+## 五、类型判断
+
+### IsA vs isinstance
 
 ```python
-# 获取编辑器世界
-world = ue.get_editor_subsystem(ue.UnrealEditorSubsystem).get_editor_world()
+# ✅ 推荐：UE 原生方式，热重载安全
+if other_actor.IsA(MyCharacter):
+    ...
 
-# 在当前关卡中生成 Actor
-spawned_actor = world.spawn_actor(MyActor, ue.Vector(0, 0, 100))
-
-# 获取当前关卡
-current_level = world.get_current_level()
+# ⚠️ Python isinstance 在热重载后可能失效
+if isinstance(other_actor, MyCharacter):
+    ...
 ```
 
-## 蓝图调用
+### 判断 UE 对象有效性
 
 ```python
-# 蓝图类以 _C 后缀结尾
-bp_class = ue.load_class('/Game/Blueprints/BP_MyActor.BP_MyActor_C')
-
-# 蓝图结构体以 _C 后缀
-my_struct = ue.MyBlueprintStruct_C()
-my_struct.some_field = 10
+if not actor.IsValid():
+    print("Actor has been destroyed")
+    return
 ```
 
-## Vector / Rotator / Transform
+---
+
+## 六、Vector / Rotator / Transform
 
 ```python
 # 向量
 pos = ue.Vector(100, 200, 300)
-length = pos.size()
-normalized = pos.get_safe_normal()
-dist = ue.Vector.dist(pos1, pos2)
+length = pos.Size()
+normalized = pos.GetSafeNormal()
+dist = ue.Vector.Dist(pos1, pos2)
 
-# 旋转
-rot = ue.Rotator(0, 90, 0)  # Pitch, Yaw, Roll
-forward = rot.vector()  # 获取前方向量
+# 旋转 (Pitch, Yaw, Roll)
+rot = ue.Rotator(0, 90, 0)
+forward = rot.Vector()
 
 # 变换
 transform = ue.Transform()
-transform.translation = ue.Vector(100, 0, 0)
-transform.rotation = ue.Rotator(0, 45, 0)
-transform.scale3d = ue.Vector(1, 1, 2)
+transform.Translation = ue.Vector(100, 0, 0)
+transform.Rotation = ue.Rotator(0, 45, 0)
+transform.Scale3D = ue.Vector(1, 1, 2)
 ```
 
-## 日志输出
+### ⚠️ 结构体是值拷贝
 
 ```python
-print("用 print 即可")           # 输出到 LogNePython
-ue.Log("普通日志")               # 大写 Log，Log 级别
-ue.LogWarning("警告日志")        # Warning 级别
-ue.LogError("错误日志")          # Error 级别
+# ❌ 错误：不会生效！
+actor.GetActorLocation().X = 10
+
+# ✅ 正确：取出来 → 修改 → 设回去
+pos = actor.GetActorLocation()
+pos.X = 10
+actor.SetActorLocation(pos)
 ```
 
-## 编辑器工具
+详见 [对象生命周期管理](object-lifecycle.md)。
+
+---
+
+## 七、遍历 Actor
 
 ```python
-import ue
+# PyIterator 遍历世界中的所有 Actor
+world = self.GetWorld()
+for actor in ue.PyIterator(ue.Actor, world):
+    print(actor.GetName())
 
-# 使用 Python 编写编辑器工具
-@ue.uclass()
-class MyEditorUtility(ue.PythonEditorUtility):
-    def run(self):
-        actors = self.get_selected_actors()
-        for actor in actors:
-            actor.set_actor_label("Processed")
-        ue.log(f"Processed {len(actors)} actors")
+# 按标签查找
+tagged_actors = ue.PyUtil.get_actors_by_tag(world, "MyTag")
+
+# 编辑器：获取选中 Actor
+editor = ue.get_editor_subsystem(ue.UnrealEditorSubsystem)
+selected = editor.get_selected_level_actors()
 ```
+
+---
+
+## 八、完整示例：从零创建可操控角色
+
+参见 [`class-authoring.md`](class-authoring.md) 的汇总示例，以及 [Ticker与Timer](ticker-timer.md) 的 Tick 顺序说明。
+
+核心模式：
+1. `@ue.uclass()` 定义 Character → import 注册
+2. 创建蓝图 → 添加 Component（Camera、Mesh）
+3. 在 `ReceiveBeginPlay` 中绑定输入（`BindAxis` / `BindAction`）
+4. 在蓝图子类中添加变量（如 `MouseSpeed`），Python 中通过 `self.MouseSpeed` 访问
