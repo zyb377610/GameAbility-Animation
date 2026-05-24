@@ -7,6 +7,7 @@ Step 1.1: GAS 角色骨架
 用法: 角色 BeginPlay 时调用 init_gas_for_actor(self)
 """
 import ue
+import traceback
 
 
 # ==================== 1. 自定义 AttributeSet ====================
@@ -66,5 +67,14 @@ def init_gas_for_actor(actor: ue.Actor):
         print(f"[GAS] Health={attr_set.Health}, MaxHealth={attr_set.MaxHealth}, "
               f"Mana={attr_set.Mana}, MaxMana={attr_set.MaxMana}, "
               f"AttackPower={attr_set.AttackPower}, MoveSpeed={attr_set.MoveSpeed}")
+
+    # 3) Step 1.4: 绑定 Tag 驱动动画
+    try:
+        from gas.tag_to_anim import bind_tag_to_anim
+        if hasattr(actor, 'Mesh'):
+            actor._tag_anim_listener = bind_tag_to_anim(asc, actor.Mesh)
+            print("[GAS] TagToAnimListener 已绑定")
+    except Exception:
+        traceback.print_exc()
 
     return asc

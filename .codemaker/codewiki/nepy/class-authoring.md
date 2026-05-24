@@ -139,12 +139,65 @@ class MyActor(ue.Actor):
 
 ⚠️ **不要用 `__init__`** — Nepy 的 `@ue.uclass()` 类不支持 Python 标准的 `__init__`。
 
+### ⚠️ 禁止在 `__init_default__` 中初始化纯 Python 实例变量
+
+**这是最常见的踩坑点。** `self.xxx = value` 只在 CDO 创建时执行一次，且热重载/实例复制时会丢失。
+
+```python
+@ue.uclass()
+class MyClass(ue.Object):
+    def __init_default__(self):
+        # ❌ 错误：以下赋值均不生效（或只在 CDO 上短暂存在）
+        self._cache = {}
+        self._handle = None
+        self._callback = None
+        self._listener_ref = some_object  # 热重载后丢失
+
+        # ✅ 正确：仅对 ue.ucomponent 配置默认值
+        self.CollisionComponent.SetSphereRadius(10.0)
+```
+
+**为什么会失败？**
+
+1. `__init_default__` 在 CDO 上执行，CDO 是 C++ 对象模板，Python shadow 对象上的 `self.xxx` 不被序列化
+2. 每次从 CDO 复制实例时，Python 成员不会被复制到新实例
+3. NePy 会打印警告：
+   > `you are trying to initialize python members in 'XXX.__init_default__()', which will take no effect.`
+
+**替代方案：**
+
+| 场景 | 正确做法 |
+|------|---------|
+| 需要实例级 Python 状态 | 在 `ReceiveBeginPlay` / 普通方法中赋值，**首次访问时懒初始化** |
+| 需要缓存/回调引用 | 用模块级变量 + 闭包，**不依赖 `@ue.uclass()` 类** |
+| 简单配置常量 | 用 `ue.uproperty()` 声明（写在 class body 层级） |
+| 不需要 UE 反射的状态 | 考虑这段逻辑是否真的需要放在 `@ue.uclass()` 类里；很多场景用**纯 Python 函数 + 闭包**更简洁可靠 |
+
+```python
+# ✅ 懒初始化模式
+@ue.uclass()
+class MyActor(ue.Actor):
+    def get_cache(self):
+        if not hasattr(self, '_cache'):
+            self._cache = {}
+        return self._cache
+
+# ✅ 更推荐：不需要 UE 反射的场景，直接用普通 Python
+def create_tag_listener(asc, mesh):
+    """纯 Python 函数，闭包持有状态，不需要 @ue.uclass()"""
+    anim_inst = mesh.GetAnimInstance()
+    def on_changed(tag, count):
+        setattr(anim_inst, "bIsHit", count > 0)
+    handle = bind_tag_event(asc, on_changed)
+    return handle  # 调用者负责管理生命周期
+```
+
 ### vs. 普通 `ReceiveBeginPlay`
 
 | 方法 | 调用时机 | 用途 |
 |------|---------|------|
-| `__init_default__` | 类注册时（一次） | 设置组件默认值、碰撞配置 |
-| `ReceiveBeginPlay` | 每个实例开始游戏时 | 绑定委托、初始化运行时状态 |
+| `__init_default__` | 类注册时（一次） | **仅**设置组件默认值、碰撞配置 |
+| `ReceiveBeginPlay` | 每个实例开始游戏时 | 绑定委托、初始化运行时状态、懒初始化 Python 变量 |
 
 ---
 

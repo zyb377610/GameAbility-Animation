@@ -163,7 +163,7 @@ _cached_references: dict = {}
 | 纯 Python 函数（如 `gmcmds.py` 中的命令） | ✅ |
 | `@ue.uclass()` 类中**新增方法** | ✅ |
 | `@ue.uclass()` 类中**已有方法的实现修改** | ❌ 需重启 PIE |
-| `@ue.uclass()` 类的 `__init_default__` 修改 | ❌ 需重启 PIE |
+| `@ue.uclass()` 类的 `__init_default__` 修改 | ❌ 需重启 PIE，且**不要在其中初始化纯 Python 实例变量**（详见 `class-authoring.md` §五） |
 
 ✅ **最佳实践**：修改 `@ue.uclass()` 类后直接关闭 PIE（编辑器 Stop）再重新 Play，不要依赖 `@reload`。
 

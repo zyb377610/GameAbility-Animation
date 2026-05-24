@@ -36,6 +36,10 @@ def on_init():
         import gas.effects.ge_cost
     except Exception:
         traceback.print_exc()
+    try:
+        import gas.tag_to_anim
+    except Exception:
+        traceback.print_exc()
 
 
 def on_shutdown():

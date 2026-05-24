@@ -189,3 +189,17 @@ def gas_init():
         return
 
     init_gas_for_actor(ctrl.Pawn)
+    # Step 1.4: 绑定 Tag → AnimBP
+    try:
+        from gas.tag_to_anim import bind_tag_to_anim, test_apply_tag
+        asc = ctrl.Pawn.GetComponentByClass(ue.AbilitySystemComponent.Class())
+        if asc and hasattr(ctrl.Pawn, 'Mesh'):
+            ctrl.Pawn._tag_anim_listener = bind_tag_to_anim(asc, ctrl.Pawn.Mesh)
+            print("[gas_init] TagToAnimListener 已绑定")
+            # 2 秒后自动测试
+            def _auto_test():
+                test_apply_tag(ctrl.Pawn, "State.Hit")
+            ue.KismetSystemLibrary.K2_SetTimerDelegate(_auto_test, 2.0, False)
+    except Exception:
+        import traceback
+        traceback.print_exc()
