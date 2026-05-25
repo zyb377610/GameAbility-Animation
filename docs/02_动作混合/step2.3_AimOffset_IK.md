@@ -21,8 +21,9 @@
 ## 三、前置条件
 
 - ✅ Step 2.1 完成：BlendSpace 移动正常
-- 🔲 需准备 AimOffset 资产（`Content/Characters/AO_Aim`），含 Pitch（-90~90）/ Yaw（-90~90）
-- 🔲 AnimBP 中需已连接 AimOffset 节点到上半身管线
+- ✅ AimOffset 资产（`Content/Characters/Mannequins/Anims/Rifle/AIM/AO_Rifle`）
+- ✅ AnimBP 中已连接 AimOffset 节点（AO_Rifle）到 BlendSpace → LayeredBoneBlend 管线
+- ✅ FABRIK IK 节点已接入 AnimGraph（hand_r → upperarm_r）
 
 ---
 
@@ -34,7 +35,7 @@
 |----------|---------|------|
 | `Content/Scripts/animation/aim_ik.py` | `AimIKController` | 计算 Pitch/Yaw 写入 AnimBP 变量；可选简单 IK 调整手持武器位置 |
 
-### 4.2 蓝图资产（手动创建）
+### 4.2 蓝图资产
 
 | 路径 | 父类 | 用途 |
 |------|------|------|
@@ -79,74 +80,55 @@ class AimIKController:
 
 ### 5.2 AimOffset 节点配置
 
-AnimBP 中：
+AnimBP 中已经完成：
 ```
-[上半身 Pose]
-  ↓
-[AimOffset: AO_Aim] (参数: AimPitch, AimYaw)
-  ↓
-[LayeredBlendPerBone / 合并到最终 Pose]
-```
-
-AimOffset 资产配置（手动）：
-- **横轴**：Yaw（-90~90 度）
-- **纵轴**：Pitch（-90~90 度）
-- 采样点：多个角度方向的瞄准姿态
-
-### 5.3 简易 IK（ControlRig 方案）
-
-`ue.ControlRigComponent` API 确认存在：
-
-```python
-class ControlRigComponent(PrimitiveComponent):
-    ControlRigClass: TSubclassOf[ControlRig]
-    ControlRig: ControlRig
-
-    # 通过 MappedElements 驱动骨骼
-    UserDefinedElements: ArrayWrapper[ControlRigComponentMappedElement]
-    MappedElements: ArrayWrapper[ControlRigComponentMappedElement]
-
-    bUpdateRigOnTick: bool
-    bResetTransformBeforeTick: bool
+BS_Locomotion
+  ↓ Pose
+AO_Rifle (AimOffset, 参数: AimPitch/X, AimYaw/Y)
+  ↓ Pose
+LayeredBoneBlend (BasePose=瞄准, BlendPoses_0=上半身蒙太奇)
+  ↓ Pose
+FABRIK (右手IK)
+  ↓ Pose
+输出
 ```
 
-IK 流程（简易方案）：
-1. 在编辑器中创建 ControlRig 蓝图 `CR_HandIK`，包含 TwoBoneIK 节点
-2. 角色蓝图中添加 `ControlRigComponent`，`ControlRigClass` 设为 `CR_HandIK`
-3. Python 控制 IK 目标点（如武器握柄位置）
+加入 AO 资产后的实际效果：
+- `AO_Rifle` 提供瞄准姿态（BasePose 从 BS_Locomotion 递进）
+- 上下半身分离通过 LayeredBoneBlend 在上半身混合 Montage（如挥拳）
+- 瞄准偏移在上半身骨骼上叠加
 
-```python
-ctrl_rig_comp = actor.get_component_by_class(ue.ControlRigComponent)
-if ctrl_rig_comp and ctrl_rig_comp.ControlRig:
-    # 设置 IK 目标骨骼位置
-    ctrl_rig_comp.ControlRig.set_editor_property("IKTarget_Hand_R", target_location)
-```
+### 5.3 IK（FABRIK）
 
-### 5.4 更轻量方案：FABRIK / TwoBoneIK 直接在 AnimBP
+AnimBP 中已有 FABRIK 节点，配置：
+- TipBone = `hand_r`（右手）
+- RootBone = `upperarm_r`（右上臂）
+- Effector = `IKHandTarget_R`（Python 写入目标位置）
+- Alpha = `IKHandAlpha`（混合权重 0~1）
 
-如果 ControlRig 过于复杂，AnimBP 内可直接用 FABRIK 或 TwoBoneIK 节点，Python 只需设置目标位置（通过 AnimBP 变量传递 `Vector`）。
+Python 驱动 `update_hand_ik(alpha)` 计算胸前握持位置，FABRIK 反算手臂骨骼。
 
-### 5.5 API 总结
+### 5.4 输入驱动方案
 
-| API | 来源 |
-|-----|------|
-| `GameplayStatics.GetPlayerCameraManager(World, PlayerIndex) -> PlayerCameraManager` | ue |
-| `PlayerCameraManager.GetCameraRotation() -> Rotator` | 需验证是否暴露 |
-| `Actor.GetActorRotation() -> Rotator` | Actor |
-| `Rotator.Pitch / .Yaw` | 需验证 Nepy 绑定 |
-| `ControlRigComponent` | 完整存在（line 159426） |
+蓝图 InputAxis 因 UE5.6 强制 EnhancedInput 无法走旧版路线，Python 接管全部输入：
+- 移动：`GetInputAxisValue("MoveForward"/"MoveRight")` 直接读键盘轴值
+- 瞄准：`GetInputAxisValue("Turn"/"LookUp")` → `AddControllerYawInput/AddControllerPitchInput`
+
+以上在 `aim_ik.py` 的 `_drive_mouse_input()` 中实现。
 
 ---
 
-## 六、待验证 API（当前不确认，务必列出）
+## 六、API 验证结果
 
-| API 调用 | 预期行为 | 实际结果 |
-|---------|---------|---------|
-| `GameplayStatics.GetPlayerCameraManager` | Python 获取摄像机管理器 | 待测试 |
-| `Rotator` 算术减法 `cam_rot - actor_rot` | 返回 delta Rotator | 待测试（Nepy 可能不支持，需手动计算） |
-| `Rotator.Pitch / .Yaw` | 读取分量 | 待测试 |
-| `ControlRigComponent.ControlRig` 属性访问 | 获取 ControlRig 实例 | 待测试 |
-| AimOffset 参数 `set_editor_property` | 运行时写入 Pitch/Yaw | 待测试 |
+| API 调用 | 结果 |
+|---------|------|
+| `GameplayStatics.GetPlayerCameraManager` | ✅ 可用 |
+| `Rotator` 算术减法 `cam_rot - actor_rot` | ✅ Nepy 支持 |
+| `Rotator.Pitch / .Yaw` | ✅ 可用 |
+| `Rotator.GetNormalized()` | ✅ 可用 |
+| `AddControllerYawInput/AddControllerPitchInput` | ✅ 在 Pawn 上（非 Controller） |
+| `K2_GetComponentToWorld` | ✅ 可用 |
+| AnimBP 变量写入 `_write_anim_var` | ✅ 可用 |
 
 ---
 
@@ -163,14 +145,14 @@ if ctrl_rig_comp and ctrl_rig_comp.ControlRig:
 
 ## 八、验证标准
 
-- [ ] Python 计算 Pitch/Yaw 差值
-- [ ] `AimPitch` / `AimYaw` 成功写入 AnimBP
-- [ ] AimOffset 驱动角色上半身转向
-- [ ] 移动中瞄准偏移不干扰下半身 BlendSpace
-- [ ] （可选）IK 使手部贴合武器位置
+- [x] Python 计算 Pitch/Yaw 差值
+- [x] `AimPitch` / `AimYaw` 成功写入 AnimBP
+- [x] AimOffset 驱动角色上半身转向
+- [x] 移动中瞄准偏移不干扰下半身 BlendSpace
+- [x] （可选）IK 使手部贴合武器位置
 
 ---
 
 ## 九、状态
 
-🔲 待开始
+✅ 已完成

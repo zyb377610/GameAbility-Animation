@@ -3,8 +3,39 @@ import ue
 import traceback
 
 
+def _force_legacy_input_classes():
+    """
+    运行时强制将 DefaultInputComponentClass 从 EnhancedInput 切回旧版。
+
+    原因：UE5 默认使用 EnhancedInput，但本项目的蓝图 InputAxis 节点
+    需要旧版 InputComponent。DefaultInput.ini 的修改可能在编辑器运行时
+    被覆盖，因此在 Python 侧做一次运行时强制设置作为兜底。
+
+    Pawn::CreatePlayerInputComponent() 读取 UInputSettings 单例，
+    每次 PIE 的 Pawn 被控制时触发，所以必须在下次 PIE 前设置好。
+    """
+    try:
+        # 方案A: 直接用 UInputSettings 的 CDO
+        input_settings = ue.InputSettings()
+        if input_settings is None:
+            # 方案B: 通过 GetMutableDefault 获取
+            input_settings = ue.GetMutableDefault(ue.InputSettings.Class())
+        if input_settings is None:
+            print('[GameAbilityAnim] 无法获取 InputSettings 单例')
+            return
+
+        input_settings.DefaultPlayerInputClass = ue.PlayerInput.Class()
+        input_settings.DefaultInputComponentClass = ue.InputComponent.Class()
+        print('[GameAbilityAnim] DefaultInputComponentClass 已强制设为 InputComponent')
+    except Exception:
+        traceback.print_exc()
+
+
 def on_init():
     print('[GameAbilityAnim] Nepy initialized.')
+
+    # ---- 强制旧版输入类（运行时兜底，不依赖 DefaultInput.ini） ----
+    _force_legacy_input_classes()
 
     # ---- 编辑器辅助工具 ----
     if ue.GIsEditor:
@@ -44,6 +75,14 @@ def on_init():
     # ---- 动画脚本模块 ----
     try:
         import animation.locomotion
+    except Exception:
+        traceback.print_exc()
+    try:
+        import animation.upper_body
+    except Exception:
+        traceback.print_exc()
+    try:
+        import animation.aim_ik
     except Exception:
         traceback.print_exc()
 

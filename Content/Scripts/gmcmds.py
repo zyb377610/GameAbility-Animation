@@ -209,12 +209,14 @@ def gas_init():
 
 def locomotion():
     """
-    对当前控制角色启动/停止 LocomotionUpdater。
+    对当前控制角色启动/停止 LocomotionUpdater + AimIKController。
     第一次调用注册，第二次调用移除（toggle）。
     """
     import ue
     from animation.locomotion import register_locomotion_for_character, \
-        unregister_locomotion_for_character, _registry
+        unregister_locomotion_for_character, _registry as _locomotion_registry
+    from animation.aim_ik import register_aim_ik, unregister_aim_ik, \
+        _registry as _aim_ik_registry
 
     w = ue.GetGameWorld()
     if not w:
@@ -227,9 +229,12 @@ def locomotion():
         return
 
     pawn = ctrl.Pawn
-    if id(pawn) in _registry:
+    if id(pawn) in _locomotion_registry:
         unregister_locomotion_for_character(pawn)
-        print("[locomotion] LocomotionUpdater 已停止")
+        unregister_aim_ik(pawn)
+        print("[locomotion] LocomotionUpdater + AimIKController 已停止")
     else:
         register_locomotion_for_character(pawn)
-        print("[locomotion] LocomotionUpdater 已启动，移动角色观察 BlendSpace 效果")
+        register_aim_ik(pawn)
+        print("[locomotion] LocomotionUpdater + AimIKController 已启动，"
+              "移动 + 瞄准观察 BlendSpace + AimOffset 效果")

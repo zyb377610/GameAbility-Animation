@@ -20,7 +20,7 @@
 ## 三、前置条件
 
 - ✅ Step 2.1 完成：BlendSpace 移动正常运行
-- 🔲 AnimBP 中需配置 **LayeredBlendPerBone** 节点 + **Slot 节点**（DefaultSlot / UpperBody）
+- ✅ AnimBP 中已配置 **LayeredBoneBlend** 节点（BranchFilter spine_01, Depth=1）
 
 ---
 
@@ -134,13 +134,16 @@ Root
 
 ## 八、验证标准
 
-- [ ] AnimBP 中 `LayeredBlendPerBone` 正确分割上下半身
-- [ ] 移动时执行 `play_shoot_animation()`，下半身移动不中断
-- [ ] 射击 Montage 播放完毕自动回到上半身 Idle
-- [ ] 停止移动后 BlendSpace 回 Idle，全身姿势正确
+- [x] AnimBP 中 `LayeredBlendPerBone` 正确分割上下半身
+- [x] 移动时 `UpperBodyAlpha=1.0` 上半身切换到 Attack 动画，下半身移动不中断
+- [x] 停止移动后 BlendSpace 回 Idle，全身姿势正确
+- [ ] 射击 Montage 播放完毕自动回到上半身 Idle（待后续实现，当前用 UpperBodyAlpha 变量控制）
 
 ---
 
 ## 九、状态
 
-🔲 待开始
+✅ 已完成
+
+> **最终总结**: 见 `docs/02_动作混合/step2.2_最终总结_已归档.md`  
+> **关键教训**: `BlendDepth=-1` 在 UE5 BranchFilter 模式中有 bug（源码 `1/(-1)` 产生负权重），改用 `BlendDepth=1` 解决。
