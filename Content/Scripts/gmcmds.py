@@ -238,3 +238,14 @@ def locomotion():
         register_aim_ik(pawn)
         print("[locomotion] LocomotionUpdater + AimIKController 已启动，"
               "移动 + 瞄准观察 BlendSpace + AimOffset 效果")
+
+
+# ==================== Step 3.1: Distance Matching ====================
+
+def dm():
+    """
+    GM 命令: @dm
+    对当前控制的 Pawn 启动/停止 Distance Matching（Toggle）
+    """
+    from animation.distance_matching import dm as _dm
+    _dm()

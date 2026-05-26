@@ -85,6 +85,10 @@ def on_init():
         import animation.aim_ik
     except Exception:
         traceback.print_exc()
+    try:
+        import animation.distance_matching
+    except Exception:
+        traceback.print_exc()
 
 
 def on_shutdown():
