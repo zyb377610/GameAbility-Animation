@@ -249,3 +249,23 @@ def dm():
     """
     from animation.distance_matching import dm as _dm
     _dm()
+
+
+# ==================== Step 4.1: LinkedAnimGraph 子图测试 ====================
+
+def sub_graph_link(weapon_index=0):
+    """GM 命令: @sub_graph_link [0|1] — 装备指定武器子图"""
+    from animation.sub_graph import sub_graph_link_test
+    sub_graph_link_test(weapon_index)
+
+
+def sub_graph_unlink():
+    """GM 命令: @sub_graph_unlink — 取消链接武器子图"""
+    from animation.sub_graph import sub_graph_unlink_test
+    sub_graph_unlink_test()
+
+
+def sub_graph_status():
+    """GM 命令: @sub_graph_status — 查看子图链接状态"""
+    from animation.sub_graph import sub_graph_status_test
+    sub_graph_status_test()

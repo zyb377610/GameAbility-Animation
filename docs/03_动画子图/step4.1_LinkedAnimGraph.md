@@ -152,14 +152,15 @@ class SubGraphController:
 
 ## 八、验证标准
 
-- [ ] Python `LinkAnimGraphByTag("Weapon", class)` 链接成功
-- [ ] 子图动画覆盖主 AnimBP 对应部位
-- [ ] `GetLinkedAnimGraphInstanceByTag` 返回非 None
-- [ ] `LinkAnimGraphByTag("Weapon", None)` 取消链接还原
-- [ ] 移动 + 武器子图同时工作（下半身移动，上半身武器动画）
+- [x] Python `LinkAnimGraphByTag("Weapon", class)` 链接成功
+- [x] 子图动画覆盖主 AnimBP 对应部位
+- [x] `GetLinkedAnimGraphInstanceByTag` 返回非 None
+- [x] `LinkAnimGraphByTag("Weapon", None)` 取消链接还原
+- [x] 移动 + 武器子图同时工作（下半身移动，上半身武器动画）
+- [x] 武器切换：`@sub_graph_link 0` / `@sub_graph_link 1` 动态切换子图
 
 ---
 
 ## 九、状态
 
-🔲 待开始
+✅ 已完成

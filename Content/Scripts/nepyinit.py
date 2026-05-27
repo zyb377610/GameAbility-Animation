@@ -89,6 +89,10 @@ def on_init():
         import animation.distance_matching
     except Exception:
         traceback.print_exc()
+    try:
+        import animation.sub_graph
+    except Exception:
+        traceback.print_exc()
 
 
 def on_shutdown():
