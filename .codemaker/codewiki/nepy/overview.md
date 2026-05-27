@@ -1,5 +1,9 @@
 # NEPY 概述与核心概念
 
+> ⚠️ **命名警告**：NEPY 导出的 UE C++ 函数保持 **PascalCase**（如 `ue.LoadClass()`），
+> **不要**使用 Python 风格的 snake_case（如 `ue.load_class()` ❌）。
+> 常见错误对照见 [命名约定](naming-convention.md)。
+
 ## 简介
 
 **NEPY** (NePythonBinding) 是网易自研的 Unreal Engine Python 脚本插件。它利用 UE 自带的类型反射数据，将 C++ 的 `UCLASS`/`USTRUCT`/`UFUNCTION`/`UPROPERTY`/`UENUM` **1:1** 导出至 Python，使开发者能用 Python 编写游戏逻辑。

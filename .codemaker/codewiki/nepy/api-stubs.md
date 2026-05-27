@@ -13,7 +13,7 @@
 | `# region enums` | 第 6 行开始 | 所有 UE 枚举类型，每个枚举继承自 `EnumBase`，有 docstring 说明 |
 | `# region structs` | 第 39541 行开始 | 所有 UE 结构体（FVector、FRotator 等），包含属性声明和方法签名 |
 | `# region classes` | 第 137389 行开始 | 所有 UE 类（Actor、Component 等），包含属性、方法和继承关系 |
-| `# region top module` | 第 325201 行开始 | 顶层模块函数（如 `load_object`、`find_object` 等全局函数） |
+| `# region top module` | 第 325201 行开始 | 顶层模块函数（如 `LoadObject`、`FindObject` 等全局函数） |
 | `# region builtin` | 第 325602 行开始 | 重新导出内置类型 |
 | `# region blueprint` | 第 325606 行开始 | 重新导出自定义蓝图类型 |
 

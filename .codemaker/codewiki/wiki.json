@@ -8,6 +8,12 @@
         "path": "nepy/overview"
       },
       {
+        "title": "NEPY API 命名约定（必读！）",
+        "description": "UE 反射函数保持 PascalCase（LoadClass/LoadObject/FindObject），禁止 Python snake_case。常见错误对照速查表、例外列表、自检方法",
+        "tags": ["nepy", "naming", "convention", "pitfall", "load-class", "api"],
+        "path": "nepy/naming-convention"
+      },
+      {
         "title": "NEPY 项目搭建与生命周期",
         "description": "nepyinit.py 全部回调函数（on_init/on_shutdown/on_post_engine_init/on_tick/on_debug_input）、GameInstance代理模式、脚本目录结构、import即注册机制",
         "tags": ["nepy", "project-setup", "nepyinit", "game-instance", "lifecycle"],
